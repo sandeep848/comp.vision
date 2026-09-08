@@ -34,7 +34,7 @@ coverage.xml
 *.cover
 
 # Dataset Downloads, Archives & Temporary Download Files
-datasets/
+/datasets/
 deepfake_robustness/processed_faces/
 processed_faces/
 *.zip
