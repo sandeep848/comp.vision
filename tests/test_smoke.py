@@ -18,9 +18,9 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import config  # noqa: E402
-from models.model import build_model  # noqa: E402
-from training.train import set_seed  # noqa: E402
+from src.configs import config  # noqa: E402
+from src.models.model import build_model  # noqa: E402
+from src.training.train import set_seed  # noqa: E402
 
 
 def test_end_to_end_smoke(tmp_path):
@@ -66,10 +66,11 @@ def test_end_to_end_smoke(tmp_path):
     output_root = tmp_path / "outputs"
     env = os.environ.copy()
     env["OUTPUT_ROOT"] = str(output_root)
+    env["PYTHONPATH"] = str(REPO_ROOT)
 
     result = subprocess.run(
         [
-            sys.executable, str(REPO_ROOT / "train.py"),
+            sys.executable, str(REPO_ROOT / "src/training/train.py"),
             "--manifest", str(manifest_path),
             "--limit_batches", "1",
             "--epochs", "1",

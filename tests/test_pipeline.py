@@ -12,12 +12,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from configs import config
-from datasets.dataset import build_connected_groups, assign_group_splits
-from models.model import build_model, DeepfakeModel
-from training.train import average_checkpoints
-from evaluation.evaluate import apply_advanced_tier_distortion
-from evaluation.metrics_utils import (
+from src.configs import config
+from src.datasets.dataset import build_connected_groups, assign_group_splits
+from src.models.model import build_model, DeepfakeModel
+from src.training.train import average_checkpoints
+from src.evaluation.evaluate import apply_advanced_tier_distortion
+from src.evaluation.metrics_utils import (
     calculate_ece,
     bootstrap_metric_ci,
     paired_bootstrap_test,
@@ -47,7 +47,7 @@ def test_union_find_connected_groups():
 
 def test_optimizer_resume_preserves_four_param_groups():
     """Regression test: Resumed optimizer must retain all 4 parameter groups and learning rates."""
-    from train import build_optimizer
+    from src.training.train import build_optimizer
     model = build_model("efficientnet_b0", pretrained=False, model_variant="fusion")
     optimizer = build_optimizer(model)
 
@@ -177,7 +177,7 @@ def test_ece_degenerate_distribution_safety():
 
 def test_celebdf_manifest_validation():
     """Regression test: validate_celebdf_manifest rejects FF++ manifests and accepts valid Celeb-DF manifests."""
-    from dataset import validate_celebdf_manifest
+    from src.datasets.dataset import validate_celebdf_manifest
 
     invalid_df = pd.DataFrame([
         {
@@ -218,7 +218,7 @@ def test_celebdf_identity_parser_no_sequence_link():
 
 def test_limit_batches_optimizer_stepping():
     """Regression test: --limit_batches flushes accumulated gradients without zero updates."""
-    from train import train_one_epoch, DeepfakeLoss
+    from src.training.train import train_one_epoch, DeepfakeLoss
     model = build_model("efficientnet_b0", pretrained=False, model_variant="fusion")
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = DeepfakeLoss(loss_type="bce")
@@ -257,7 +257,7 @@ def test_limit_batches_optimizer_stepping():
 
 def test_calculate_binary_metrics_empty_inputs():
     """Regression test: calculate_binary_metrics handling of empty inputs."""
-    from train import calculate_binary_metrics
+    from src.training.train import calculate_binary_metrics
     metrics = calculate_binary_metrics([], [])
     assert np.isnan(metrics["accuracy"])
     assert np.isnan(metrics["roc_auc"])
@@ -338,7 +338,7 @@ def test_distinct_degradation_tiers():
 
 def test_align_face_crop_affine_eye_centering():
     """Verify align_face_crop maps eye midpoint to target coordinates within tolerance."""
-    from extract_faces import align_face_crop
+    from src.datasets.extract_faces import align_face_crop
     frame = np.zeros((500, 500, 3), dtype=np.uint8)
     frame[150:350, 150:350] = 255
 
@@ -353,7 +353,7 @@ def test_align_face_crop_affine_eye_centering():
 
 def test_partial_gradient_accumulation_scaling():
     """Regression test: Partial gradient accumulation window scales gradients to match exact average."""
-    from train import train_one_epoch, DeepfakeLoss
+    from src.training.train import train_one_epoch, DeepfakeLoss
     model = build_model("efficientnet_b0", pretrained=False, model_variant="fusion")
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = DeepfakeLoss(loss_type="bce")
@@ -389,7 +389,7 @@ def test_partial_gradient_accumulation_scaling():
 
 def test_predictions_df_has_manipulation_key():
     """Verify evaluate_model includes 'manipulation' column in returned predictions DataFrame."""
-    from train import evaluate_model, DeepfakeLoss
+    from src.training.train import evaluate_model, DeepfakeLoss
     model = build_model("efficientnet_b0", pretrained=False, model_variant="fusion")
     criterion = DeepfakeLoss(loss_type="bce")
 
@@ -413,7 +413,7 @@ def test_predictions_df_has_manipulation_key():
 
 def test_srm_filters_zero_sum_and_shapes():
     """Verify MultiScaleSRMLayer kernels are zero-sum, non-trainable, and produce 27 channels."""
-    from model import MultiScaleSRMLayer
+    from src.models.model import MultiScaleSRMLayer
     srm = MultiScaleSRMLayer()
     for name, param in srm.named_parameters():
         assert not param.requires_grad
@@ -430,7 +430,7 @@ def test_srm_filters_zero_sum_and_shapes():
 
 def test_ece_constant_prediction_calibration_error():
     """Verify constant prediction (0.5 for all, 0.8 positive prevalence) produces calibration error ~0.3."""
-    from metrics_utils import calculate_ece
+    from src.evaluation.metrics_utils import calculate_ece
     y_true = np.array([1]*80 + [0]*20)  # 80% positive
     y_prob = np.array([0.5]*100)        # Constant 0.5 prediction
     ece = calculate_ece(y_true, y_prob)
@@ -439,7 +439,7 @@ def test_ece_constant_prediction_calibration_error():
 
 def test_manifest_leakage_and_validation(tmp_path):
     """Verify validate_manifest detects group leakage, missing columns, and invalid labels."""
-    from dataset import validate_manifest
+    from src.datasets.dataset import validate_manifest
 
     # Use real (empty) files so the file-existence check passes and the leakage-detection
     # logic is actually exercised, rather than failing earlier for an unrelated reason.
@@ -464,7 +464,7 @@ def test_manifest_leakage_and_validation(tmp_path):
 
 def test_resume_training_smoke(tmp_path):
     """Smoke test: Verify model, optimizer, and scheduler resume binding from checkpoint."""
-    from train import build_optimizer, build_scheduler, safe_torch_save
+    from src.training.train import build_optimizer, build_scheduler, safe_torch_save
     model = build_model("efficientnet_b0", pretrained=False, model_variant="fusion")
     optimizer = build_optimizer(model)
     scheduler = build_scheduler(optimizer)
@@ -492,8 +492,8 @@ def test_resume_training_smoke(tmp_path):
 def test_end_to_end_training_smoke(tmp_path):
     """End-to-end lightweight training smoke test exercising full orchestration path on CPU."""
     from PIL import Image
-    from train import train_one_epoch, evaluate_model, DeepfakeLoss, build_optimizer, build_scheduler, safe_torch_save
-    from dataset import get_dataloaders
+    from src.training.train import train_one_epoch, evaluate_model, DeepfakeLoss, build_optimizer, build_scheduler, safe_torch_save
+    from src.datasets.dataset import get_dataloaders
     
     # 1. Create temporary dataset images
     img_dir = tmp_path / "images"
@@ -537,7 +537,7 @@ def test_end_to_end_training_smoke(tmp_path):
 def test_compute_optimal_f1_threshold_matches_expected_optimum():
     """Regression test: post-training threshold calibration is F1-optimal (t* = argmax_t F1(t)),
     not Youden's J - verify it recovers the known-ideal threshold on perfectly separable data."""
-    from train import compute_optimal_f1_threshold
+    from src.training.train import compute_optimal_f1_threshold
 
     labels = np.array([0, 0, 0, 0, 1, 1, 1, 1])
     probs = np.array([0.05, 0.1, 0.2, 0.4, 0.6, 0.7, 0.9, 0.95])
@@ -553,7 +553,7 @@ def test_compute_optimal_f1_threshold_matches_hand_computed_confusion_matrix():
     candidate threshold, confirming sklearn's precision_recall_curve off-by-one indexing
     (prec/rec arrays have len(thresholds) + 1 elements; the code must drop the last,
     threshold-less prec/rec point rather than misaligning the arrays)."""
-    from train import compute_optimal_f1_threshold
+    from src.training.train import compute_optimal_f1_threshold
 
     y_true = np.array([0, 0, 0, 1, 1, 1])
     y_prob = np.array([0.10, 0.40, 0.35, 0.80, 0.50, 0.30])
@@ -575,7 +575,7 @@ def test_compute_optimal_f1_threshold_edge_cases():
     """Edge cases for the F1-threshold calibration: all-real, all-fake, identical
     probabilities, perfect separation, and ties must not crash and must return a threshold
     in [0, 1] with a finite F1 in [0, 1]."""
-    from train import compute_optimal_f1_threshold
+    from src.training.train import compute_optimal_f1_threshold
 
     def _assert_sane(threshold, f1):
         assert 0.0 <= threshold <= 1.0
@@ -611,7 +611,7 @@ def test_compute_optimal_f1_threshold_empty_input_does_not_crash():
     (an internal numpy broadcast error, not a friendly message) - compute_optimal_f1_threshold
     must guard against this and return its documented (0.50, 0.0) fallback instead of
     propagating the crash."""
-    from train import compute_optimal_f1_threshold
+    from src.training.train import compute_optimal_f1_threshold
 
     threshold, f1 = compute_optimal_f1_threshold(np.array([]), np.array([]))
     assert threshold == 0.50
@@ -623,7 +623,7 @@ def test_resolve_checkpoint_model_kwargs_prefers_metadata():
     metadata (self-describing 'configuration' dict, or top-level fields) rather than a
     separately-duplicated inference rule, with a fallback to config.py for legacy
     checkpoints that predate self-describing metadata."""
-    from model import resolve_checkpoint_model_kwargs
+    from src.models.model import resolve_checkpoint_model_kwargs
 
     ckpt = {
         "model_state_dict": {},
@@ -663,7 +663,7 @@ def test_resolve_checkpoint_model_kwargs_infers_branch_mode_from_variant():
     happens to differ from what the checkpoint was actually trained with, which previously
     could even make an otherwise-loadable rgb_only checkpoint fail build_model's own
     'rgb_only cannot pair with branch_mode=freq' contradiction check purely by accident."""
-    from model import resolve_checkpoint_model_kwargs
+    from src.models.model import resolve_checkpoint_model_kwargs
 
     original_branch_mode = getattr(config, "BRANCH_MODE", "fusion")
     try:
@@ -691,7 +691,7 @@ def test_resolve_checkpoint_model_kwargs_roundtrips_through_build_and_load():
     exactly, i.e. load_state_dict(strict=True) must succeed without any missing/unexpected
     keys - proving the inferred branch_mode produces the real, loadable architecture, not
     just a plausible-looking tuple."""
-    from model import build_model, resolve_checkpoint_model_kwargs
+    from src.models.model import build_model, resolve_checkpoint_model_kwargs
 
     trained_model = build_model("efficientnet_b0", pretrained=False, model_variant="rgb_only")
     fake_checkpoint = {
@@ -711,7 +711,7 @@ def test_generate_celebdf_manifest_retains_train_and_test_videos(tmp_path):
     retained (labeled split='train'), not silently dropped, matching how evaluate.run_celebdf_eval
     consumes the manifest (it filters to split=='test' when the column is present). The manifest
     must also carry group_id and category columns regardless of source layout."""
-    from dataset import generate_celebdf_manifest
+    from src.datasets.dataset import generate_celebdf_manifest
     from PIL import Image
 
     celeb_root = tmp_path / "Celeb-DF-v2"
@@ -755,7 +755,7 @@ def test_generate_celebdf_manifest_raw_video_fallback(tmp_path):
     import cv2
     import numpy as np
 
-    from dataset import generate_celebdf_manifest
+    from src.datasets.dataset import generate_celebdf_manifest
 
     celeb_root = tmp_path / "Celeb-DF-v2-raw"
     celeb_root.mkdir()
@@ -809,7 +809,7 @@ def test_validate_selection_splittable_succeeds_for_well_separated_videos():
     """--sanity-style selection where manipulated videos reference source identities that are
     NOT among the selected 'original' videos: 3 real (solo) groups + 4 disjoint fake-pair
     groups = 7 independent groups, comfortably splittable without leakage."""
-    from extract_faces import validate_selection_splittable
+    from src.datasets.extract_faces import validate_selection_splittable
 
     video_ids = ["000", "001", "002", "010_020", "030_040", "050_060", "070_080"]
     labels = [0, 0, 0, 1, 1, 1, 1]
@@ -826,7 +826,7 @@ def test_validate_selection_splittable_raises_for_collapsed_connectivity():
     actionable error (not silently allowed to overlap, and not a confusing crash) - real
     FaceForensics++ data is not available to test this empirically, so this reproduces the
     group-structure shape that could plausibly occur, per the code's own connectivity logic."""
-    from extract_faces import validate_selection_splittable
+    from src.datasets.extract_faces import validate_selection_splittable
 
     # 3 real ids (000, 001, 002) + 4 fake videos that all cross-link them into one component:
     # 000-001, 001-002, 002-000, 000-002 (redundant edges, still one giant component).
@@ -842,7 +842,7 @@ def test_validate_selection_splittable_appends_sanity_guidance_only_when_request
     """The --sanity-specific remediation guidance must only be appended when sanity_mode=True,
     so a non-sanity failure (e.g. a genuinely tiny real dataset) isn't misleadingly told to
     tweak --sanity-specific config knobs."""
-    from extract_faces import validate_selection_splittable
+    from src.datasets.extract_faces import validate_selection_splittable
 
     video_ids = ["000", "001", "002", "000_001", "001_002", "002_000", "000_002"]
     labels = [0, 0, 0, 1, 1, 1, 1]
@@ -862,7 +862,7 @@ def test_dataloader_worker_init_fn_is_deterministic_and_distinct_per_worker():
     while still giving different workers distinct RNG streams."""
     import pickle
     import random as random_module
-    from dataset import _dataloader_worker_init_fn
+    from src.datasets.dataset import _dataloader_worker_init_fn
 
     def _capture_state(worker_id):
         _dataloader_worker_init_fn(worker_id)
@@ -893,7 +893,7 @@ def test_dataloader_worker_init_fn_picklable_under_explicit_spawn_context(tmp_pa
     'Can't pickle local object' here; the module-scope function must not."""
     from torchvision import transforms as T
     from PIL import Image
-    from dataset import DeepfakeImageDataset, _dataloader_worker_init_fn
+    from src.datasets.dataset import DeepfakeImageDataset, _dataloader_worker_init_fn
 
     paths = []
     for i in range(6):

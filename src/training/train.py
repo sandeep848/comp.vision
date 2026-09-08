@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 import torch
 import torch.nn as nn
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -19,11 +20,11 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from configs import config
-from datasets.dataset import get_dataloaders, assign_group_splits, validate_manifest
-from models.model import build_model, resolve_checkpoint_model_kwargs
-from degradations.transforms import get_degradation_transform_for_epoch
-from evaluation.metrics_utils import compute_video_level_metrics
+from src.configs import config
+from src.datasets.dataset import get_dataloaders, assign_group_splits, validate_manifest
+from src.models.model import build_model, resolve_checkpoint_model_kwargs
+from src.degradations.transforms import get_degradation_transform_for_epoch
+from src.evaluation.metrics_utils import compute_video_level_metrics
 
 class DeepfakeLoss(nn.Module):
     def __init__(self, loss_type="focal", alpha=0.50, gamma=1.5, smoothing=0.05, class_weights=None):
@@ -376,7 +377,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, limit_b
                 optimizer.zero_grad(set_to_none=True)
                 accum_count = 0
                 if ema is not None:
-                    ema.update()
+                    ema.update_parameters(model)
         else:
             logits, _ = model(images)
             logits = logits.squeeze(1)
@@ -399,7 +400,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, limit_b
                 optimizer.zero_grad(set_to_none=True)
                 accum_count = 0
                 if ema is not None:
-                    ema.update()
+                    ema.update_parameters(model)
 
         probabilities = torch.sigmoid(logits.detach())
         running_loss += loss.item() * images.size(0)
@@ -832,21 +833,6 @@ def main():
     scheduler = build_scheduler(optimizer)
 
     # Smith-style Learning Rate Finder execution
-    if args.find_lr:
-        print("\n[+] Triggering Learning Rate Range Test...")
-        lrs, losses = LRFinder(model, optimizer, criterion, device).range_test(train_loader, num_iter=100)
-        
-        lr_plot_path = config.OUTPUT_ROOT / "lr_finder.png"
-        plt.figure(figsize=(10, 5))
-        plt.plot(lrs, losses)
-        plt.xscale("log")
-        plt.xlabel("Learning Rate")
-        plt.ylabel("Loss")
-        plt.title("Learning Rate Range Test")
-        plt.savefig(lr_plot_path)
-        print(f"--> LR plot saved to {lr_plot_path}")
-        return
-
     scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" and getattr(config, "USE_MIXED_PRECISION", True) else None
 
     # TensorBoard setup
@@ -954,10 +940,9 @@ def main():
             scheduler = build_scheduler(optimizer)
 
     # Initialize EMA tracker
-    ema = EMA(model, decay=config.EMA_DECAY)
+    ema = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(config.EMA_DECAY))
     if resume_success and isinstance(checkpoint, dict) and "ema_shadow" in checkpoint and checkpoint["ema_shadow"] is not None:
-        ema.shadow = checkpoint["ema_shadow"]
-        ema._num_updates = checkpoint.get("ema_updates", 0)
+        ema.load_state_dict(checkpoint["ema_shadow"])
         print("--> Restored EMA shadow weights from checkpoint.")
 
     # Determine num_freeze
@@ -1012,7 +997,7 @@ def main():
                     })
                 sync_scheduler_param_groups(scheduler, optimizer, config.BACKBONE_LR)
 
-            ema.register_new_parameters()
+            # EMA updates parameters automatically
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
             print(f"--> Updated number of trainable parameters: {trainable_params:,}")
         
@@ -1038,7 +1023,7 @@ def main():
             ema=ema,
         )
 
-        ema.apply_shadow()
+        
         val_metrics, val_predictions_df = evaluate_model(
             model=model,
             loader=val_loader,
@@ -1046,7 +1031,7 @@ def main():
             device=device,
             limit_batches=args.limit_batches,
         )
-        ema.restore()
+        
 
         val_video_res = compute_video_level_metrics(val_predictions_df)
         val_video_auc = val_video_res.get("video_roc_auc", float("nan"))
@@ -1129,8 +1114,7 @@ def main():
         epoch_ckpt_path = experiment_directory / f"best_model_epoch_{epoch}.pt"
         total_training_time_so_far = time.time() - training_start_time
 
-        if ema is not None:
-            ema.apply_shadow()
+        
 
         safe_torch_save(
             {
@@ -1151,8 +1135,7 @@ def main():
             epoch_ckpt_path,
         )
 
-        if ema is not None:
-            ema.restore()
+        
 
         best_checkpoints.append((current_score, metric_name, epoch_ckpt_path))
         # Filter best_checkpoints to ensure only candidates with matching selection metric type are kept
@@ -1197,8 +1180,7 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
-                "ema_shadow": ema.shadow if ema is not None else None,
-                "ema_updates": ema._num_updates if ema is not None else 0,
+                "ema_shadow": ema.state_dict() if ema is not None else None,
                 "best_validation_auc": best_validation_auc,
                 "best_validation_score": best_validation_score,
                 "using_auc_tracking": using_auc_tracking,

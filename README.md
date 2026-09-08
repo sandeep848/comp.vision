@@ -56,9 +56,9 @@ pip install -r requirements.txt
 ### 2. Dataset Acquisition
 Download the FaceForensics++ video sequences (`c23` compression tier):
 ```bash
-python download-FaceForensics.py datasets/FaceForensics -t videos
+python -m src.datasets.download-FaceForensics datasets/FaceForensics -t videos
 ```
-*(Optionally, use `python download_celebdf.py` to download the Celeb-DF v2 dataset for cross-dataset generalization testing).*
+*(Optionally, use `python -m src.datasets.download_celebdf` to download the Celeb-DF v2 dataset for cross-dataset generalization testing).*
 
 ### 3. Face Extraction & Group Stratification
 Extract aligned 256x256 face crops with MTCNN and zero-leakage group assignment.
@@ -67,26 +67,69 @@ fails fast with an actionable error, before running face extraction, if the samp
 source identities happen to connect into too few independent groups to form a leakage-free
 split — see "Strict Leakage Enforcement" below).*
 ```bash
-python extract_faces.py
+python -m src.datasets.extract_faces
 ```
 
 ### 4. Model Training
 **Train Standard Baseline Model (Clean Data):**
 ```bash
-python train.py --model efficientnet_b0 --strategy clean --epochs 30 --batch_size 32
+python -m src.training.train --model efficientnet_b0 --strategy clean --epochs 30 --batch_size 32
 ```
 
 **Train Robustness-Aware Model (Degradation Augmentations):**
 ```bash
-python train.py --model efficientnet_b0 --strategy degradation --epochs 30 --batch_size 32
+python -m src.training.train --model efficientnet_b0 --strategy degradation --epochs 30 --batch_size 32
 ```
 
 ### 5. Comparative Evaluation Benchmark
 Run the complete 15-tier benchmark suite (Bootstrap CI, ROC-AUC, ECE):
 ```bash
-python evaluate.py --mode comparative --bootstraps 1000
+python -m src.evaluation.evaluate --mode comparative --bootstraps 1000
 ```
 *(To monitor training live, use: `tensorboard --logdir=deepfake_robustness/outputs/runs`)*
+
+### 6. Grad-CAM Interpretability
+
+Grad-CAM (`gradcam.py`) is a **secondary, inference-only** interpretability layer on top of
+already-trained checkpoints. It does not affect training, the model architecture, the
+train/val/test split, or the main quantitative robustness metrics in any way.
+
+**Single image, single model:**
+```bash
+python -m src.evaluation.gradcam \
+  --checkpoint deepfake_robustness/outputs/efficientnet_b0_clean/best_model.pt \
+  --image path/to/face.jpg \
+  --output deepfake_robustness/outputs/gradcam_example.png
+```
+Produces `Original face | Grad-CAM heatmap | Heatmap overlay` plus a JSON metadata sidecar
+(`gradcam_example.json`) recording the checkpoint, model variant, degradation, predicted class,
+fake probability, threshold, and target layer used.
+
+**Clean vs. degraded comparison (same model):**
+```bash
+python -m src.evaluation.gradcam --checkpoint <ckpt.pt> --image <face.jpg> --output <out.png> \
+  --degradation strong_compression --compare-degradation
+```
+
+**Standard vs. robustness-aware model comparison (same input):**
+```bash
+python -m src.evaluation.gradcam --checkpoint <clean_ckpt.pt> --compare-checkpoint <degradation_ckpt.pt> \
+  --image <face.jpg> --output <out.png> [--degradation resize_50_compress_70]
+```
+
+Other flags: `--branch {rgb,freq}` (RGB backbone vs. the MS-SRM frequency branch, when the
+checkpoint's architecture has one) and `--target-class {predicted,fake,real}` (which score to
+backpropagate from; see `gradcam.py`'s module docstring for how this is derived from the
+model's single pre-sigmoid logit).
+
+**Methodological caution:** Grad-CAM shows which regions influenced the model's output score -
+it does **not** prove the model located the true manipulation region, and a heatmap is not a
+segmentation mask. It is a qualitative, exploratory diagnostic and must not replace or be
+conflated with the quantitative robustness evaluation above (ROC-AUC/ECE/bootstrap CIs).
+Heatmap comparisons across degradation tiers or model checkpoints are exploratory; the optional
+`compare_gradcam_maps()` similarity numbers (cosine similarity / Pearson correlation / windowed
+SSIM) are descriptive aids for a single image pair, not a statistical claim. See the full
+discussion in `gradcam.py`'s module docstring.
 
 ---
 
@@ -120,20 +163,22 @@ Evaluated across **15 distinct degradation tiers**. Statistical validity is enfo
 
 ```
 .
-├── config.py                            # Central hyperparameters & degradation tier definitions
-├── model.py                             # EfficientNet-B0 Dual-Branch + SFCA
-├── dataset.py                           # PyTorch Dataset & zero-leakage manifest handling
-├── transforms.py                        # Augmentation pipelines (Standard vs Degradation)
-├── train.py                             # Training engine (AdamW, EMA, Mixup)
-├── evaluate.py                          # 15-tier benchmark matrix evaluation
-├── extract_faces.py                     # MTCNN extraction & landmark alignment
-├── metrics_utils.py                     # AUC, ECE, & Bootstrap 95% CIs
-├── download-FaceForensics.py            # FF++ dataset downloader
-├── download_celebdf.py                  # Celeb-DF v2 dataset downloader
+├── src/configs/config.py                            # Central hyperparameters & degradation tier definitions
+├── src/models/model.py                             # EfficientNet-B0 Dual-Branch + SFCA
+├── src/datasets/dataset.py                           # PyTorch Dataset & zero-leakage manifest handling
+├── src/degradations/transforms.py                        # Augmentation pipelines (Standard vs Degradation)
+├── src/training/train.py                             # Training engine (AdamW, EMA, Mixup)
+├── src/evaluation/evaluate.py                          # 15-tier benchmark matrix evaluation
+├── src/evaluation/gradcam.py                           # Grad-CAM interpretability CLI & reusable API
+├── src/datasets/extract_faces.py                     # MTCNN extraction & landmark alignment
+├── src/evaluation/metrics_utils.py                     # AUC, ECE, & Bootstrap 95% CIs
+├── src/datasets/download-FaceForensics.py            # FF++ dataset downloader
+├── src/datasets/download_celebdf.py                  # Celeb-DF v2 dataset downloader
 ├── tests/
 │   ├── test_pipeline.py                 # Core pipeline regression tests
 │   ├── test_dataset.py                  # Dataset splitting leakage tests
-│   └── test_smoke.py                    # End-to-end synthetic sanity checks
+│   ├── test_smoke.py                    # End-to-end synthetic sanity checks
+│   └── test_gradcam.py                  # Grad-CAM unit tests (synthetic models/images)
 └── .github/workflows/ci.yml             # CI testing pipeline
 ```
 

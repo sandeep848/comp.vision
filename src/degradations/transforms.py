@@ -7,7 +7,7 @@ from PIL import Image, ImageEnhance
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
-from configs import config
+from src.configs import config
 
 class RandomJPEGCompression:
     def __init__(self, quality_range=(50, 95), probability=0.75):

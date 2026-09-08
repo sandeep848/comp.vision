@@ -331,7 +331,7 @@ def paired_video_bootstrap_test(
     )
 
 
-from scipy.stats import false_discovery_control
+from scipy.stats import false_discovery_control, bootstrap
 
 def apply_fdr_correction(p_values: List[float], alpha: float = 0.05) -> Tuple[np.ndarray, np.ndarray]:
     """Apply Benjamini-Hochberg False Discovery Rate (FDR) multiple-testing correction via SciPy."""

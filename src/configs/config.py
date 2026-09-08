@@ -10,7 +10,7 @@ except ImportError:
     IN_COLAB = False
 
 # Base Paths (Relative to script location or overridden via environment variables)
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 if os.getenv("PROJECT_ROOT"):
     PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT"))

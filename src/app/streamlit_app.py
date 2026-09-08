@@ -13,9 +13,9 @@ from streamlit_image_comparison import image_comparison
 root_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(root_dir))
 
-from configs import config
-from models.model import build_model
-from degradations.transforms import RandomJPEGCompression, RandomDownscaleRestore, RandomGaussianNoise, RandomMotionBlur, RandomSharpen
+from src.configs import config
+from src.models.model import build_model
+from src.degradations.transforms import RandomJPEGCompression, RandomDownscaleRestore, RandomGaussianNoise, RandomMotionBlur, RandomSharpen
 
 # Page config
 st.set_page_config(page_title="Deepfake Vibe Check", page_icon="🔮", layout="wide")
@@ -92,15 +92,67 @@ with st.sidebar:
     blur_k = st.slider("Motion Blur", 0, 7, 0, 2, help="Must be an odd number (0 for off)")
     sharp_f = st.slider("Sharpen", 1.0, 3.0, 1.0, 0.2, help="Higher = excessive sharpening")
 
+
+from src.evaluation.gradcam import generate_gradcam, get_target_layer, overlay_heatmap
+from src.evaluation.evaluate import load_model_from_checkpoint
+from src.degradations.transforms import get_transforms
+
 @st.cache_resource
 def load_models():
-    # Load dummy models
-    m1 = build_model(config.MODEL_NAME, pretrained=False)
-    m2 = build_model(config.MODEL_NAME, pretrained=False)
-    m1.eval(); m2.eval()
+    # Attempt to load real checkpoints if they exist
+    clean_ckpt = config.OUTPUT_ROOT / "efficientnet_b0_clean" / "best_model.pt"
+    robust_ckpt = config.OUTPUT_ROOT / "efficientnet_b0_degradation" / "best_model.pt"
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        if robust_ckpt.exists():
+            m1, _, _ = load_model_from_checkpoint(robust_ckpt, device)
+        else:
+            m1 = build_model(config.MODEL_NAME, pretrained=False).to(device)
+            m1.eval()
+            
+        if clean_ckpt.exists():
+            m2, _, _ = load_model_from_checkpoint(clean_ckpt, device)
+        else:
+            m2 = build_model(config.MODEL_NAME, pretrained=False).to(device)
+            m2.eval()
+    except Exception:
+        m1 = build_model(config.MODEL_NAME, pretrained=False).to(device)
+        m2 = build_model(config.MODEL_NAME, pretrained=False).to(device)
+        m1.eval(); m2.eval()
+        
     return m1, m2
 
 model1, model2 = load_models()
+
+def run_model(model, img):
+    _, eval_transform = get_transforms()
+    input_tensor = eval_transform(img).unsqueeze(0)
+    device = next(model.parameters()).device
+    model.eval()
+    with torch.no_grad():
+        logits, _ = model(input_tensor.to(device))
+        fake_prob = torch.sigmoid(logits.squeeze(1)).item()
+    return fake_prob
+
+def generate_real_heatmap(model, img, target_class="predicted"):
+    _, eval_transform = get_transforms()
+    input_tensor = eval_transform(img).unsqueeze(0)
+    device = next(model.parameters()).device
+    model.eval()
+    with torch.no_grad():
+        logits, _ = model(input_tensor.to(device))
+        prob = torch.sigmoid(logits.squeeze(1)).item()
+        
+    resolved_target = "fake" if prob >= 0.5 else "real"
+    if target_class != "predicted":
+        resolved_target = target_class
+        
+    target_layer = get_target_layer(model, branch="rgb")
+    cam, _ = generate_gradcam(model, input_tensor, target_layer, target_class=resolved_target)
+    overlay, _ = overlay_heatmap(img, cam)
+    return overlay
+
 
 def apply_all_degradations(img):
     # Apply based on sliders
@@ -117,22 +169,7 @@ def apply_all_degradations(img):
         img = RandomJPEGCompression(quality_range=(jpeg_q, jpeg_q), probability=1.0)(img)
     return img
 
-def generate_dummy_heatmap(img, intensity):
-    # Generates a fake "activation map" for visual flair since we don't have a trained Grad-CAM yet
-    img_cv = np.array(img)
-    heatmap = np.zeros((img_cv.shape[0], img_cv.shape[1]), dtype=np.float32)
-    
-    import random
-    for _ in range(int(3 * intensity)):
-        x = random.randint(0, img_cv.shape[1])
-        y = random.randint(0, img_cv.shape[0])
-        cv2.circle(heatmap, (x, y), random.randint(30, 80), 1.0, -1)
-        
-    heatmap = cv2.GaussianBlur(heatmap, (101, 101), 0)
-    heatmap = np.uint8(255 * heatmap)
-    colormap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(img_cv, 0.6, colormap, 0.4, 0)
-    return Image.fromarray(overlay)
+
 
 
 if uploaded_file:
@@ -141,16 +178,16 @@ if uploaded_file:
 
     t1, t2, t3 = st.tabs(["👁️ VISION", "📈 TELEMETRY", "🔍 EXPLAINER"])
     
-    # Dummy probability calculation based on degradations
-    prob_clean = 0.92
-    degradation_penalty = (100 - jpeg_q)*0.005 + (1.0 - resize_s)*0.4 + noise_lvl*0.03 + blur_k*0.05
     
-    if "Robust" in model_choice:
-        prob_deg = max(0.55, prob_clean - degradation_penalty * 0.3)
-    else:
-        prob_deg = max(0.12, prob_clean - degradation_penalty * 1.2)
-        
+    # Real probability calculation via forward pass
+    active_model = model1 if "Robust" in model_choice else model2
+    prob_clean = run_model(active_model, orig_img)
+    prob_deg = run_model(active_model, deg_img)
     is_fake = prob_deg > 0.5
+    
+    # Estimate degradation penalty for the UI telemetry
+    degradation_penalty = max(0, prob_clean - prob_deg)
+
 
     with t1:
         st.markdown("### // IMAGE COMPARISON")
@@ -188,15 +225,14 @@ if uploaded_file:
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("### // CONFIDENCE TRAJECTORY")
-        # Generate chart
+        
+        # Generate chart by sweeping JPEG quality
         qs = np.linspace(100, 10, 10)
         trajectories = []
         for q in qs:
-            pen = (100 - q)*0.005 + (1.0 - resize_s)*0.4 + noise_lvl*0.03 + blur_k*0.05
-            if "Robust" in model_choice:
-                trajectories.append(max(0.55, prob_clean - pen * 0.3))
-            else:
-                trajectories.append(max(0.12, prob_clean - pen * 1.2))
+            sweep_img = RandomJPEGCompression(quality_range=(int(q), int(q)), probability=1.0)(orig_img)
+            trajectories.append(run_model(active_model, sweep_img))
+
                 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=qs, y=trajectories, mode='lines+markers', 
@@ -220,10 +256,10 @@ if uploaded_file:
         c1, c2 = st.columns(2)
         with c1:
             st.write("ON SOURCE")
-            st.image(generate_dummy_heatmap(orig_img, 0.8), use_container_width=True)
+            st.image(generate_real_heatmap(active_model, orig_img), use_container_width=True)
         with c2:
             st.write("ON CORRUPTED")
-            st.image(generate_dummy_heatmap(deg_img, 1.5 if is_fake else 0.3), use_container_width=True)
+            st.image(generate_real_heatmap(active_model, deg_img), use_container_width=True)
 
 else:
     st.markdown("""

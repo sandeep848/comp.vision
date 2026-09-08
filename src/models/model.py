@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
 
-from configs import config
+from src.configs import config
 
 class MultiScaleSRMLayer(nn.Module):
     """
