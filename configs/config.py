@@ -62,8 +62,11 @@ MIN_FACE_PROBABILITY = 0.90
 FACE_MARGIN_PERCENT = 0.10
 FORCE_REEXTRACT = False
 ALIGN_FACES = True
-MAX_VIDEOS_PER_CATEGORY = None
-MAX_EXTRACTION_VIDEOS_PER_CATEGORY = None
+# Caps the raw per-category video LISTING read from disk, before real/fake balancing.
+MAX_CANDIDATE_VIDEOS_PER_CATEGORY = None
+# Caps how many already-BALANCED/selected videos per manipulation group are actually sent
+# to face extraction (applied after MAX_CANDIDATE_VIDEOS_PER_CATEGORY and balancing).
+MAX_SELECTED_VIDEOS_PER_CATEGORY = None
 
 # Data Paths (Celeb-DF External Dataset)
 CELEBDF_ROOT = BASE_DIR / "datasets" / "Celeb-DF-v2"
@@ -98,8 +101,11 @@ DEGRADATION_TIERS = {
     "gaussian_noise": {"noise_std": 6.0},
     "color_jitter": {"color_jitter": 0.2},
     "resize_50_compress_70": {"jpeg_quality": 70, "resize_scale": 0.50},
-    "screenshot_recompress": {"resize_scale": 0.70, "jpeg_quality": 60, "chain": ["resize_70", "compress_60"]},
-    "social_media_pipeline": {"resize_scale": 0.50, "jpeg_quality": 50, "motion_blur_size": 3, "chain": ["resize_50", "motion_blur_3", "compress_50"]},
+    # Note: the actual per-tier operation order (resize -> blur -> motion-blur -> color-jitter
+    # -> noise -> JPEG) is fixed by apply_advanced_tier_distortion (evaluate.py); these tiers
+    # apply resize + JPEG (and, for social_media_pipeline, motion blur) in that fixed order.
+    "screenshot_recompress": {"resize_scale": 0.70, "jpeg_quality": 60},
+    "social_media_pipeline": {"resize_scale": 0.50, "jpeg_quality": 50, "motion_blur_size": 3},
 }
 
 # Preprocessing Thresholds

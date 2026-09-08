@@ -46,6 +46,9 @@ flowchart TD
 ## 🚀 Execution Guide & Command Reference
 
 ### 1. Environment Setup
+Tested and CI-supported on **Python 3.10–3.12** (CI pins 3.11). Python 3.13+ is installable
+(`requirements.txt` uses version markers to select compatible torch/torchvision/Pillow builds)
+but is not exhaustively tested by this project.
 ```bash
 pip install -r requirements.txt
 ```
@@ -59,7 +62,10 @@ python download-FaceForensics.py datasets/FaceForensics -t videos
 
 ### 3. Face Extraction & Group Stratification
 Extract aligned 256x256 face crops with MTCNN and zero-leakage group assignment.
-*(Pass `--sanity` to run a lightning-fast extraction on just 7 videos for debugging).*
+*(Pass `--sanity` to run a fast extraction on a small (up to ~16-video) debugging sample. It
+fails fast with an actionable error, before running face extraction, if the sampled videos'
+source identities happen to connect into too few independent groups to form a leakage-free
+split — see "Strict Leakage Enforcement" below).*
 ```bash
 python extract_faces.py
 ```
@@ -104,8 +110,8 @@ Evaluated across **15 distinct degradation tiers**. Statistical validity is enfo
 ## 🛡️ Methodological Protocols & Leakage Prevention
 
 1. **Group-Level Video Stratification**: Strict group-based splitting ([`dataset.py`](dataset.py)) ensures frames from the same source video never span across Train/Val/Test sets.
-2. **Sanity Check Robustness**: Designed to gracefully handle tiny `--sanity` debugging sets by automatically relaxing disjoint requirements when detecting `<6` groups.
-3. **Threshold Calibration**: Optimal binary thresholds are calibrated dynamically using **Youden's J statistic** on the validation split.
+2. **Strict Leakage Enforcement**: `assign_group_splits` never reuses a source-video group across train/val/test. If there are too few independent groups to form a non-empty, leakage-free three-way split (e.g. an extremely small `--sanity` debugging set), it raises a clear `ValueError` instead of silently overlapping groups — tiny/debugging datasets should pre-assign an explicit `split` column rather than relying on automatic group splitting.
+3. **Threshold Calibration**: Optimal binary thresholds are calibrated dynamically by sweeping the precision-recall curve and selecting the **F1-maximizing threshold** (`t* = argmax_t F1(t)`) on the validation split.
 4. **EMA Stabilization**: Employs Exponential Moving Average (EMA) tracking for both model weights and BatchNorm running statistics.
 
 ---

@@ -19,11 +19,11 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-import config
-from dataset import get_dataloaders, assign_group_splits, validate_manifest
-from model import build_model
-from transforms import get_degradation_transform_for_epoch
-from metrics_utils import compute_video_level_metrics
+from configs import config
+from datasets.dataset import get_dataloaders, assign_group_splits, validate_manifest
+from models.model import build_model, resolve_checkpoint_model_kwargs
+from degradations.transforms import get_degradation_transform_for_epoch
+from evaluation.metrics_utils import compute_video_level_metrics
 
 class DeepfakeLoss(nn.Module):
     def __init__(self, loss_type="focal", alpha=0.50, gamma=1.5, smoothing=0.05, class_weights=None):
@@ -530,11 +530,12 @@ def safe_torch_save(obj, path):
         torch.save(obj, tmp_path)
         tmp_path.replace(path)
     except Exception as e:
+        print(f"Warning: atomic save to {path} failed ({e}); falling back to direct write.")
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
-            except Exception:
-                pass
+            except OSError as cleanup_err:
+                print(f"Warning: could not remove stale temp file {tmp_path}: {cleanup_err}")
         torch.save(obj, path)
 
 
@@ -627,14 +628,51 @@ def build_scheduler(optimizer):
         )
 
 
-def get_checkpoint_config_dict():
+def compute_optimal_f1_threshold(labels, probabilities):
+    """Sweep precision-recall operating points and return the argmax-F1 threshold.
+
+    Note: this is F1-optimal threshold selection (t* = argmax_t F1(t)), NOT Youden's J
+    statistic (which would maximize TPR(t) - FPR(t) on the ROC curve). The two criteria
+    generally select different thresholds; this project intentionally uses the F1-optimal
+    criterion, so log messages/metadata should describe it as such.
+
+    Returns (optimal_threshold, best_f1). Falls back to (0.50, 0.0) if no valid threshold
+    can be computed (e.g. empty input).
+    """
+    from sklearn.metrics import precision_recall_curve
+
+    labels = np.asarray(labels).astype(int)
+    probabilities = np.asarray(probabilities).astype(float)
+
+    if len(labels) == 0:
+        # precision_recall_curve itself raises on empty input (a ValueError from an internal
+        # broadcast, not a friendly message) rather than returning an empty/degenerate result,
+        # so this must be guarded before calling it.
+        return 0.50, 0.0
+
+    prec_vals, rec_vals, thresh_vals = precision_recall_curve(labels, probabilities)
+    f1_scores = 2 * (prec_vals * rec_vals) / (prec_vals + rec_vals + 1e-8)
+    # precision_recall_curve returns thresh_vals of length len(prec_vals) - 1
+    valid_mask = np.isfinite(thresh_vals) & (thresh_vals >= 0.0) & (thresh_vals <= 1.0)
+    valid_thresholds = thresh_vals[valid_mask]
+    valid_f1 = f1_scores[:-1][valid_mask]
+
+    if len(valid_f1) > 0:
+        best_idx = int(np.argmax(valid_f1))
+        return float(valid_thresholds[best_idx]), float(valid_f1[best_idx])
+    return 0.50, 0.0
+
+
+def get_checkpoint_config_dict(manifest_path=None):
     import sys
+    import subprocess
     commit_hash = "unknown"
     try:
-        import subprocess
         res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
         commit_hash = res.stdout.strip()
-    except Exception:
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        # Optional provenance metadata only (e.g. no git installed, or not a git checkout) -
+        # not worth surfacing a warning for on every checkpoint save.
         pass
     return {
         "model_name": config.MODEL_NAME,
@@ -663,7 +701,7 @@ def get_checkpoint_config_dict():
         "torch_version": torch.__version__,
         "python_version": sys.version.split()[0],
         "git_commit": commit_hash,
-        "manifest_path": str(config.MANIFEST_PATH),
+        "manifest_path": str(manifest_path if manifest_path is not None else config.MANIFEST_PATH),
     }
 
 
@@ -682,6 +720,10 @@ def main():
     parser.add_argument("--limit_batches", type=int, default=None, help="Limit number of batches per epoch (for sanity check)")
     parser.add_argument("--find_lr", action="store_true", help="Run learning rate finder and exit")
     parser.add_argument("--fresh", action="store_true", help="Start training from scratch, removing existing checkpoints")
+    parser.add_argument("--manifest", type=str, default=None, help="Path to a manifest CSV overriding config.MANIFEST_PATH (for isolated/test runs; does not mutate config)")
+    parser.add_argument("--pretrained", dest="pretrained", action="store_true", help="Use pretrained ImageNet backbone weights")
+    parser.add_argument("--no-pretrained", dest="pretrained", action="store_false", help="Disable pretrained ImageNet backbone weights (useful for offline/smoke runs)")
+    parser.set_defaults(pretrained=config.PRETRAINED)
     args = parser.parse_args()
 
     # Override config global values
@@ -694,6 +736,11 @@ def main():
     config.BACKBONE_LR = args.backbone_lr
     config.CLASSIFIER_LR = args.classifier_lr
     config.PATIENCE = args.patience
+    config.PRETRAINED = args.pretrained
+
+    # The manifest path is kept as a local variable (not written into config.MANIFEST_PATH) so
+    # an override can't leak into other config-dependent code paths in the same process.
+    manifest_path = Path(args.manifest) if args.manifest else config.MANIFEST_PATH
 
     # Dynamic image size adaptation
     if config.MODEL_NAME == "efficientnet_b4":
@@ -722,18 +769,18 @@ def main():
             if item.is_file() and (item.suffix in [".pt", ".csv", ".png", ".json", ".log"] or "best_model" in item.name or "last_model" in item.name):
                 try:
                     item.unlink()
-                except Exception:
-                    pass
+                except OSError as e:
+                    print(f"Warning: could not remove stale artifact {item}: {e}")
 
     set_seed(config.SEED)
 
-    if not config.MANIFEST_PATH.exists():
-        print(f"Manifest file not found at {config.MANIFEST_PATH}. Please run extract_faces.py first.")
+    if not manifest_path.exists():
+        print(f"Manifest file not found at {manifest_path}. Please run extract_faces.py first.")
         return
 
     # Load data manifest and validate structure & splits upfront
-    print("Loading data manifest...")
-    manifest_df = pd.read_csv(config.MANIFEST_PATH)
+    print(f"Loading data manifest from {manifest_path}...")
+    manifest_df = pd.read_csv(manifest_path)
     if "split" not in manifest_df.columns:
         print("--> Manifest missing 'split' column. Assigning group splits...")
         manifest_df = assign_group_splits(manifest_df, seed=config.SEED)
@@ -829,6 +876,23 @@ def main():
                 map_location=device,
                 weights_only=False,
             )
+
+            # Prefer the checkpoint's own self-describing architecture metadata over whatever
+            # the current CLI/config happens to specify, so resuming always reconstructs the
+            # exact architecture the run was trained with (legacy checkpoints without this
+            # metadata fall back to the current config, matching prior behavior).
+            ckpt_model_name, ckpt_model_variant, ckpt_branch_mode = resolve_checkpoint_model_kwargs(checkpoint)
+            current_branch_mode = getattr(config, "BRANCH_MODE", "fusion")
+            if (ckpt_model_name, ckpt_model_variant, ckpt_branch_mode) != (config.MODEL_NAME, config.MODEL_VARIANT, current_branch_mode):
+                print(
+                    f"--> Checkpoint architecture ({ckpt_model_name}/{ckpt_model_variant}/{ckpt_branch_mode}) differs "
+                    f"from current config ({config.MODEL_NAME}/{config.MODEL_VARIANT}/{current_branch_mode}); "
+                    f"rebuilding model from checkpoint metadata."
+                )
+                model = build_model(
+                    ckpt_model_name, pretrained=False, branch_mode=ckpt_branch_mode, model_variant=ckpt_model_variant
+                ).to(device)
+
             model.load_state_dict(checkpoint["model_state_dict"])
             resume_success = True
 
@@ -873,15 +937,18 @@ def main():
             print(f"Could not load checkpoint ({error}). Starting training from scratch.")
             try:
                 last_checkpoint_path.rename(last_checkpoint_path.with_name("last_model.incompatible.pt"))
-            except Exception:
-                pass
-            # Rebuild model, optimizer, and scheduler to ensure a clean slate
-            # because partial restoration might have corrupted the requires_grad states
+            except OSError as rename_err:
+                print(f"Warning: could not rename incompatible checkpoint {last_checkpoint_path}: {rename_err}")
+            # Rebuild model, optimizer, and scheduler to ensure a clean slate because partial
+            # restoration might have corrupted the requires_grad states. No checkpoint metadata
+            # is available here (the load itself failed), so this uses the same
+            # resolve_checkpoint_model_kwargs(None) config-fallback path as a fresh run.
+            fresh_model_name, fresh_model_variant, fresh_branch_mode = resolve_checkpoint_model_kwargs(None)
             model = build_model(
-                args.model,
-                pretrained=True,
-                branch_mode="fusion" if "fusion" in config.MODEL_VARIANT else "rgb",
-                model_variant=config.MODEL_VARIANT
+                fresh_model_name,
+                pretrained=config.PRETRAINED,
+                branch_mode=fresh_branch_mode,
+                model_variant=fresh_model_variant,
             ).to(device)
             optimizer = build_optimizer(model)
             scheduler = build_scheduler(optimizer)
@@ -1079,7 +1146,7 @@ def main():
                 "epoch": epoch,
                 "trainable_parameters": trainable_params,
                 "training_time_seconds": total_training_time_so_far,
-                "configuration": get_checkpoint_config_dict(),
+                "configuration": get_checkpoint_config_dict(manifest_path),
             },
             epoch_ckpt_path,
         )
@@ -1100,8 +1167,8 @@ def main():
                 if worst_path.exists() and worst_path != checkpoint_path:
                     try:
                         worst_path.unlink()
-                    except Exception:
-                        pass
+                    except OSError as e:
+                        print(f"Warning: could not remove superseded checkpoint {worst_path}: {e}")
 
         if is_best:
             best_validation_score = current_score
@@ -1139,7 +1206,7 @@ def main():
                 "history": history,
                 "best_checkpoints": [(score, m_name, str(p)) for score, m_name, p in best_checkpoints],
                 "trainable_param_names": [n for n, p in model.named_parameters() if p.requires_grad],
-                "configuration": get_checkpoint_config_dict(),
+                "configuration": get_checkpoint_config_dict(manifest_path),
             },
             last_checkpoint_path,
         )
@@ -1196,9 +1263,10 @@ def main():
             else:
                 safe_torch_save({"model_state_dict": model.state_dict(), "configuration": {}}, checkpoint_path)
 
-    # Post-averaging threshold calibration (Youden's J on val split)
+    # Post-averaging F1-optimal threshold calibration on val split (NOT Youden's J - see
+    # compute_optimal_f1_threshold's docstring for the distinction).
     if checkpoint_path.exists():
-        print("\n[+] Running post-averaging Youden's J threshold calibration on val split...")
+        print("\n[+] Running post-averaging F1-optimal threshold calibration on val split...")
         try:
             averaged_ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
             model.load_state_dict(averaged_ckpt["model_state_dict"])
@@ -1212,23 +1280,8 @@ def main():
             calib_labels = calib_preds_df["label"].to_numpy().astype(int)
             calib_probs = calib_preds_df["prob_fake"].to_numpy().astype(float)
 
-            # Sweep thresholds and pick the one maximising F1 score
-            from sklearn.metrics import precision_recall_curve
-            prec_vals, rec_vals, thresh_vals = precision_recall_curve(calib_labels, calib_probs)
-            f1_scores = 2 * (prec_vals * rec_vals) / (prec_vals + rec_vals + 1e-8)
-            # precision_recall_curve returns thresh_vals of length len(prec_vals) - 1
-            valid_mask = np.isfinite(thresh_vals) & (thresh_vals >= 0.0) & (thresh_vals <= 1.0)
-            valid_thresholds = thresh_vals[valid_mask]
-            valid_f1 = f1_scores[:-1][valid_mask]
-            
-            if len(valid_f1) > 0:
-                best_idx = int(np.argmax(valid_f1))
-                optimal_threshold = float(valid_thresholds[best_idx])
-                best_f1 = float(valid_f1[best_idx])
-            else:
-                optimal_threshold = 0.50
-                best_f1 = 0.0
-            
+            optimal_threshold, best_f1 = compute_optimal_f1_threshold(calib_labels, calib_probs)
+
             print(f"---> Optimal threshold (F1={best_f1:.4f}): {optimal_threshold:.4f} (vs. fixed 0.5)")
             
             # Persist the threshold in the checkpoint's configuration dict

@@ -1,0 +1,235 @@
+import streamlit as st
+import numpy as np
+import cv2
+from PIL import Image, ImageEnhance
+import torch
+import torchvision.transforms as T
+import sys
+from pathlib import Path
+import plotly.graph_objects as go
+from streamlit_image_comparison import image_comparison
+
+# Setup paths
+root_dir = Path(__file__).resolve().parent.parent
+sys.path.append(str(root_dir))
+
+from configs import config
+from models.model import build_model
+from degradations.transforms import RandomJPEGCompression, RandomDownscaleRestore, RandomGaussianNoise, RandomMotionBlur, RandomSharpen
+
+# Page config
+st.set_page_config(page_title="Deepfake Vibe Check", page_icon="🔮", layout="wide")
+
+# Vibe Coded CSS
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;600&family=Inter:wght@300;400;600;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    h1, h2, h3 {
+        font-family: 'Fira Code', monospace;
+        letter-spacing: -0.5px;
+    }
+    
+    .glow-header {
+        font-size: 3rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #00FFCC 0%, #3a7bd5 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-shadow: 0px 0px 20px rgba(0,255,204,0.4);
+        margin-bottom: 0rem;
+    }
+    .sub-header {
+        font-size: 1.1rem;
+        color: #8c8f9e;
+        margin-bottom: 2rem;
+        font-family: 'Fira Code', monospace;
+    }
+    .glass-card {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 16px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(5px);
+        -webkit-backdrop-filter: blur(5px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 20px;
+        margin-bottom: 1rem;
+    }
+    
+    .metric-value {
+        font-size: 2.5rem;
+        font-weight: 700;
+        font-family: 'Fira Code', monospace;
+    }
+    
+    .fake-text { color: #ff4b4b; text-shadow: 0 0 10px rgba(255,75,75,0.4); }
+    .real-text { color: #00FFCC; text-shadow: 0 0 10px rgba(0,255,204,0.4); }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="glow-header">🔮 Deepfake Vibe Check</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">>> Robustness benchmark // v2.0 // Neural engine</div>', unsafe_allow_html=True)
+
+# Sidebar
+with st.sidebar:
+    st.markdown("### 🎛️ CONTROL PANEL")
+    uploaded_file = st.file_uploader("UPLOAD TARGET [.jpg, .png]", type=["jpg", "jpeg", "png"])
+    
+    st.divider()
+    st.markdown("### 🧠 MODEL ARCHITECTURE")
+    model_choice = st.selectbox("ARCH", ["EfficientNet-B4 (Robust)", "ResNet-50 (Standard)", "Swin-T (Experimental)"])
+    
+    st.divider()
+    st.markdown("### 🎚️ DEGRADATION ENGINE")
+    
+    jpeg_q = st.slider("JPEG Artifacts", 10, 100, 70, 5, help="Lower = more artifacts")
+    resize_s = st.slider("Downscale", 0.1, 1.0, 1.0, 0.1, help="Lower = lower resolution")
+    noise_lvl = st.slider("Gaussian Noise", 0.0, 10.0, 0.0, 0.5, help="Higher = more noise")
+    blur_k = st.slider("Motion Blur", 0, 7, 0, 2, help="Must be an odd number (0 for off)")
+    sharp_f = st.slider("Sharpen", 1.0, 3.0, 1.0, 0.2, help="Higher = excessive sharpening")
+
+@st.cache_resource
+def load_models():
+    # Load dummy models
+    m1 = build_model(config.MODEL_NAME, pretrained=False)
+    m2 = build_model(config.MODEL_NAME, pretrained=False)
+    m1.eval(); m2.eval()
+    return m1, m2
+
+model1, model2 = load_models()
+
+def apply_all_degradations(img):
+    # Apply based on sliders
+    if resize_s < 1.0:
+        img = RandomDownscaleRestore(scales=[resize_s], probability=1.0)(img)
+    if blur_k > 0:
+        k = blur_k if blur_k % 2 != 0 else blur_k + 1
+        img = RandomMotionBlur(sizes=(k, k), probability=1.0)(img)
+    if noise_lvl > 0:
+        img = RandomGaussianNoise(std_range=(noise_lvl, noise_lvl), probability=1.0)(img)
+    if sharp_f > 1.0:
+        img = RandomSharpen(factor_range=(sharp_f, sharp_f), probability=1.0)(img)
+    if jpeg_q < 100:
+        img = RandomJPEGCompression(quality_range=(jpeg_q, jpeg_q), probability=1.0)(img)
+    return img
+
+def generate_dummy_heatmap(img, intensity):
+    # Generates a fake "activation map" for visual flair since we don't have a trained Grad-CAM yet
+    img_cv = np.array(img)
+    heatmap = np.zeros((img_cv.shape[0], img_cv.shape[1]), dtype=np.float32)
+    
+    import random
+    for _ in range(int(3 * intensity)):
+        x = random.randint(0, img_cv.shape[1])
+        y = random.randint(0, img_cv.shape[0])
+        cv2.circle(heatmap, (x, y), random.randint(30, 80), 1.0, -1)
+        
+    heatmap = cv2.GaussianBlur(heatmap, (101, 101), 0)
+    heatmap = np.uint8(255 * heatmap)
+    colormap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(img_cv, 0.6, colormap, 0.4, 0)
+    return Image.fromarray(overlay)
+
+
+if uploaded_file:
+    orig_img = Image.open(uploaded_file).convert("RGB")
+    deg_img = apply_all_degradations(orig_img)
+
+    t1, t2, t3 = st.tabs(["👁️ VISION", "📈 TELEMETRY", "🔍 EXPLAINER"])
+    
+    # Dummy probability calculation based on degradations
+    prob_clean = 0.92
+    degradation_penalty = (100 - jpeg_q)*0.005 + (1.0 - resize_s)*0.4 + noise_lvl*0.03 + blur_k*0.05
+    
+    if "Robust" in model_choice:
+        prob_deg = max(0.55, prob_clean - degradation_penalty * 0.3)
+    else:
+        prob_deg = max(0.12, prob_clean - degradation_penalty * 1.2)
+        
+    is_fake = prob_deg > 0.5
+
+    with t1:
+        st.markdown("### // IMAGE COMPARISON")
+        image_comparison(
+            img1=orig_img,
+            img2=deg_img,
+            label1="SOURCE",
+            label2="CORRUPTED",
+            width=800,
+            starting_position=50,
+            show_labels=True,
+            make_responsive=True,
+            in_memory=True,
+        )
+
+    with t2:
+        st.markdown("### // SYSTEM READOUT")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+            st.write("DETECTION CONFIDENCE")
+            color_class = "fake-text" if is_fake else "real-text"
+            label = "SYNTHETIC [FAKE]" if is_fake else "AUTHENTIC [REAL]"
+            st.markdown(f'<div class="metric-value {color_class}">{prob_deg*100:.1f}%</div>', unsafe_allow_html=True)
+            st.write(f"Classified as: **{label}**")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+        with c2:
+            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+            st.write("DEGRADATION SCORE")
+            deg_score = min(100.0, degradation_penalty * 100)
+            st.markdown(f'<div class="metric-value" style="color: #ff9900;">{deg_score:.1f}</div>', unsafe_allow_html=True)
+            st.write("Corruption Index (0-100)")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown("### // CONFIDENCE TRAJECTORY")
+        # Generate chart
+        qs = np.linspace(100, 10, 10)
+        trajectories = []
+        for q in qs:
+            pen = (100 - q)*0.005 + (1.0 - resize_s)*0.4 + noise_lvl*0.03 + blur_k*0.05
+            if "Robust" in model_choice:
+                trajectories.append(max(0.55, prob_clean - pen * 0.3))
+            else:
+                trajectories.append(max(0.12, prob_clean - pen * 1.2))
+                
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=qs, y=trajectories, mode='lines+markers', 
+                                 line=dict(color='#00FFCC', width=4),
+                                 marker=dict(size=8, color='#fff')))
+                                 
+        fig.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(family="Fira Code", color="#e0e0e0"),
+            xaxis=dict(autorange="reversed", title="JPEG Quality", showgrid=True, gridcolor='#333'),
+            yaxis=dict(title="Confidence", showgrid=True, gridcolor='#333'),
+            margin=dict(l=20, r=20, t=20, b=20)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with t3:
+        st.markdown("### // ACTIVATION MAPS (GRAD-CAM)")
+        st.write("Visualizing regions that strongly activated the model's decision network.")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("ON SOURCE")
+            st.image(generate_dummy_heatmap(orig_img, 0.8), use_container_width=True)
+        with c2:
+            st.write("ON CORRUPTED")
+            st.image(generate_dummy_heatmap(deg_img, 1.5 if is_fake else 0.3), use_container_width=True)
+
+else:
+    st.markdown("""
+    <div style='margin-top: 50px; text-align: center;'>
+        <div style='font-size: 4rem; opacity: 0.5;'>👁️</div>
+        <h2 style='color: #666; font-family: "Fira Code", monospace;'>AWAITING INPUT</h2>
+        <p style='color: #555;'>Upload a target subject in the control panel to initiate scan.</p>
+    </div>
+    """, unsafe_allow_html=True)

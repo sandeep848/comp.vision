@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
 
-import config
+from configs import config
 
 class MultiScaleSRMLayer(nn.Module):
     """
@@ -317,6 +317,75 @@ class DeepfakeModel(nn.Module):
         fused = torch.cat(features, dim=1) if len(features) > 1 else features[0]
         out, feat = self.head(fused)
         return out, feat
+
+
+# The only unambiguous model_variant -> branch_mode mapping (see resolve_checkpoint_model_kwargs
+# docstring for why the reverse direction is NOT similarly inferred).
+_NATURAL_BRANCH_MODE_FOR_VARIANT = {"rgb_only": "rgb", "fusion": "fusion", "fusion_no_attn": "fusion"}
+
+
+def resolve_checkpoint_model_kwargs(checkpoint=None):
+    """Resolve (model_name, model_variant, branch_mode) for reconstructing a model.
+
+    This is the single authoritative mechanism for deciding a model's architecture fields when
+    reconstructing it from a checkpoint (training resume, evaluation, or recovery after a
+    failed load). Fallback hierarchy, per field, in order:
+
+      1. Top-level checkpoint key (e.g. checkpoint["model_variant"]), if present and not None.
+      2. The nested checkpoint["configuration"] dict's matching key, if present and not None.
+      3. For branch_mode ONLY: if the checkpoint specifies model_variant (via 1 or 2) but not
+         branch_mode, infer branch_mode from that model_variant using the natural, unambiguous
+         mapping {"rgb_only": "rgb", "fusion": "fusion", "fusion_no_attn": "fusion"}. This is
+         deliberately preferred over falling back to config.py's current BRANCH_MODE, which may
+         belong to an unrelated experiment and would otherwise make resolution for the (very
+         common) "checkpoint has model_variant but predates the branch_mode metadata field"
+         case non-deterministic across machines/environments.
+      4. config.py's current value (MODEL_NAME / MODEL_VARIANT / BRANCH_MODE), for whichever
+         checkpoint fields are entirely absent (legacy checkpoints with no self-describing
+         metadata at all, or no checkpoint given).
+
+    Note the asymmetry: a missing model_variant is NOT inferred from a present branch_mode,
+    because branch_mode='fusion' is inherently ambiguous between model_variant 'fusion' and
+    'fusion_no_attn' - there is no unambiguous reverse mapping, so that case always falls
+    through to config.py (step 4).
+
+    This does not itself validate consistency between the resolved fields (e.g. a checkpoint
+    could carry contradictory explicit model_variant/branch_mode metadata) - build_model()
+    performs that validation and raises a clear ValueError, and a genuine architecture
+    mismatch against the checkpoint's saved state_dict keys will raise loudly via
+    model.load_state_dict()'s strict key checking. Neither path can silently produce a
+    working-but-wrong model, since DeepfakeModel's forward() branches on the exact same
+    (branch_mode, model_variant) pair used to decide which submodules get constructed.
+    """
+    cfg = {}
+    if checkpoint is not None:
+        cfg = checkpoint.get("configuration", {}) or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+    def _present(key):
+        in_top_level = checkpoint is not None and key in checkpoint and checkpoint[key] is not None
+        in_cfg = key in cfg and cfg[key] is not None
+        return in_top_level or in_cfg
+
+    def _get(key, default):
+        if checkpoint is not None and key in checkpoint and checkpoint[key] is not None:
+            return checkpoint[key]
+        if key in cfg and cfg[key] is not None:
+            return cfg[key]
+        return default
+
+    model_name = _get("model_name", getattr(config, "MODEL_NAME", "efficientnet_b0"))
+    model_variant = _get("model_variant", getattr(config, "MODEL_VARIANT", "fusion"))
+
+    if _present("branch_mode"):
+        branch_mode = _get("branch_mode", getattr(config, "BRANCH_MODE", "fusion"))
+    elif _present("model_variant"):
+        branch_mode = _NATURAL_BRANCH_MODE_FOR_VARIANT.get(model_variant, getattr(config, "BRANCH_MODE", "fusion"))
+    else:
+        branch_mode = getattr(config, "BRANCH_MODE", "fusion")
+
+    return model_name, model_variant, branch_mode
 
 
 def build_model(model_name=None, pretrained=None, branch_mode=None, model_variant=None):

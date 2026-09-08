@@ -12,12 +12,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-import config
-from dataset import build_connected_groups, assign_group_splits
-from model import build_model, DeepfakeModel
-from train import average_checkpoints
-from evaluate import apply_advanced_tier_distortion
-from metrics_utils import (
+from configs import config
+from datasets.dataset import build_connected_groups, assign_group_splits
+from models.model import build_model, DeepfakeModel
+from training.train import average_checkpoints
+from evaluation.evaluate import apply_advanced_tier_distortion
+from evaluation.metrics_utils import (
     calculate_ece,
     bootstrap_metric_ci,
     paired_bootstrap_test,
@@ -437,13 +437,25 @@ def test_ece_constant_prediction_calibration_error():
     assert np.isclose(ece, 0.30, atol=0.05)
 
 
-def test_manifest_leakage_and_validation():
+def test_manifest_leakage_and_validation(tmp_path):
     """Verify validate_manifest detects group leakage, missing columns, and invalid labels."""
     from dataset import validate_manifest
-    # Leaking manifest
+
+    # Use real (empty) files so the file-existence check passes and the leakage-detection
+    # logic is actually exercised, rather than failing earlier for an unrelated reason.
+    paths = []
+    for i in range(3):
+        p = tmp_path / f"{i}.jpg"
+        p.write_bytes(b"\x00")
+        paths.append(str(p))
+
+    # Leaking manifest: group 'g1' appears in both train and test splits. A 'val' row with a
+    # distinct, non-leaking group is included so all three splits are non-empty and the
+    # leakage check (not the empty-split check) is what actually fires.
     df_leak = pd.DataFrame([
-        {"image_path": "/tmp/1.jpg", "video_id": "v1", "group_id": "g1", "label": 1, "split": "train"},
-        {"image_path": "/tmp/2.jpg", "video_id": "v2", "group_id": "g1", "label": 0, "split": "test"},
+        {"image_path": paths[0], "video_id": "v1", "group_id": "g1", "label": 1, "split": "train"},
+        {"image_path": paths[1], "video_id": "v2", "group_id": "g1", "label": 0, "split": "test"},
+        {"image_path": paths[2], "video_id": "v3", "group_id": "g2", "label": 1, "split": "val"},
     ])
     valid, msg = validate_manifest(df_leak)
     assert not valid
@@ -520,3 +532,391 @@ def test_end_to_end_training_smoke(tmp_path):
     ckpt_path = tmp_path / "best_model.pt"
     safe_torch_save({"model_state_dict": model.state_dict(), "epoch": 1}, ckpt_path)
     assert ckpt_path.exists()
+
+
+def test_compute_optimal_f1_threshold_matches_expected_optimum():
+    """Regression test: post-training threshold calibration is F1-optimal (t* = argmax_t F1(t)),
+    not Youden's J - verify it recovers the known-ideal threshold on perfectly separable data."""
+    from train import compute_optimal_f1_threshold
+
+    labels = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    probs = np.array([0.05, 0.1, 0.2, 0.4, 0.6, 0.7, 0.9, 0.95])
+
+    threshold, best_f1 = compute_optimal_f1_threshold(labels, probs)
+
+    assert best_f1 == pytest.approx(1.0)
+    assert 0.4 < threshold <= 0.6
+
+
+def test_compute_optimal_f1_threshold_matches_hand_computed_confusion_matrix():
+    """Regression test: verify against a hand-computed confusion-matrix table at every
+    candidate threshold, confirming sklearn's precision_recall_curve off-by-one indexing
+    (prec/rec arrays have len(thresholds) + 1 elements; the code must drop the last,
+    threshold-less prec/rec point rather than misaligning the arrays)."""
+    from train import compute_optimal_f1_threshold
+
+    y_true = np.array([0, 0, 0, 1, 1, 1])
+    y_prob = np.array([0.10, 0.40, 0.35, 0.80, 0.50, 0.30])
+
+    # Hand-computed F1 at every distinct probability value used as a ">=" threshold:
+    #   t=0.10: TP=3 FP=3 TN=0 FN=0 -> P=0.500 R=1.000 F1=0.667
+    #   t=0.30: TP=3 FP=2 TN=1 FN=0 -> P=0.600 R=1.000 F1=0.750
+    #   t=0.35: TP=2 FP=2 TN=1 FN=1 -> P=0.500 R=0.667 F1=0.571
+    #   t=0.40: TP=2 FP=1 TN=2 FN=1 -> P=0.667 R=0.667 F1=0.667
+    #   t=0.50: TP=2 FP=0 TN=3 FN=1 -> P=1.000 R=0.667 F1=0.800  <- max
+    #   t=0.80: TP=1 FP=0 TN=3 FN=2 -> P=1.000 R=0.333 F1=0.500
+    threshold, best_f1 = compute_optimal_f1_threshold(y_true, y_prob)
+
+    assert threshold == pytest.approx(0.50)
+    assert best_f1 == pytest.approx(0.80)
+
+
+def test_compute_optimal_f1_threshold_edge_cases():
+    """Edge cases for the F1-threshold calibration: all-real, all-fake, identical
+    probabilities, perfect separation, and ties must not crash and must return a threshold
+    in [0, 1] with a finite F1 in [0, 1]."""
+    from train import compute_optimal_f1_threshold
+
+    def _assert_sane(threshold, f1):
+        assert 0.0 <= threshold <= 1.0
+        assert 0.0 <= f1 <= 1.0
+
+    # All labels real (no positive class): precision/recall are degenerate, but must not crash.
+    _assert_sane(*compute_optimal_f1_threshold(np.array([0, 0, 0, 0]), np.array([0.1, 0.3, 0.6, 0.9])))
+
+    # All labels fake (no negative class).
+    _assert_sane(*compute_optimal_f1_threshold(np.array([1, 1, 1, 1]), np.array([0.1, 0.3, 0.6, 0.9])))
+
+    # Identical probabilities with mixed labels (every threshold gives the same confusion matrix).
+    _assert_sane(*compute_optimal_f1_threshold(np.array([0, 1, 0, 1]), np.array([0.5, 0.5, 0.5, 0.5])))
+
+    # Perfect predictions: F1 should reach (approximately) 1.0.
+    threshold, f1 = compute_optimal_f1_threshold(np.array([0, 0, 1, 1]), np.array([0.01, 0.02, 0.98, 0.99]))
+    assert f1 == pytest.approx(1.0, abs=1e-4)
+    assert 0.02 < threshold <= 0.98
+
+    # Ties between adjacent thresholds achieving the same max F1: must deterministically
+    # pick one (np.argmax's first-occurrence rule), not crash or raise on ambiguity.
+    threshold, f1 = compute_optimal_f1_threshold(
+        np.array([0, 0, 1, 1, 1]), np.array([0.2, 0.2, 0.7, 0.7, 0.9])
+    )
+    _assert_sane(threshold, f1)
+
+    # Single sample.
+    _assert_sane(*compute_optimal_f1_threshold(np.array([1]), np.array([0.7])))
+
+
+def test_compute_optimal_f1_threshold_empty_input_does_not_crash():
+    """Regression test: precision_recall_curve itself raises a ValueError on empty input
+    (an internal numpy broadcast error, not a friendly message) - compute_optimal_f1_threshold
+    must guard against this and return its documented (0.50, 0.0) fallback instead of
+    propagating the crash."""
+    from train import compute_optimal_f1_threshold
+
+    threshold, f1 = compute_optimal_f1_threshold(np.array([]), np.array([]))
+    assert threshold == 0.50
+    assert f1 == 0.0
+
+
+def test_resolve_checkpoint_model_kwargs_prefers_metadata():
+    """Regression test: checkpoint recovery must resolve architecture from checkpoint
+    metadata (self-describing 'configuration' dict, or top-level fields) rather than a
+    separately-duplicated inference rule, with a fallback to config.py for legacy
+    checkpoints that predate self-describing metadata."""
+    from model import resolve_checkpoint_model_kwargs
+
+    ckpt = {
+        "model_state_dict": {},
+        "configuration": {"model_name": "efficientnet_b0", "model_variant": "rgb_only", "branch_mode": "rgb"},
+    }
+    name, variant, branch = resolve_checkpoint_model_kwargs(ckpt)
+    assert (name, variant, branch) == ("efficientnet_b0", "rgb_only", "rgb")
+
+    # Top-level fields take precedence over the nested 'configuration' dict.
+    ckpt_top_level = {
+        "model_state_dict": {},
+        "model_variant": "fusion_no_attn",
+        "configuration": {"model_variant": "fusion"},
+    }
+    _, variant2, _ = resolve_checkpoint_model_kwargs(ckpt_top_level)
+    assert variant2 == "fusion_no_attn"
+
+    # Legacy checkpoint without any self-describing metadata falls back to config.py.
+    legacy_ckpt = {"model_state_dict": {}}
+    name3, variant3, branch3 = resolve_checkpoint_model_kwargs(legacy_ckpt)
+    assert name3 == config.MODEL_NAME
+    assert variant3 == config.MODEL_VARIANT
+    assert branch3 == getattr(config, "BRANCH_MODE", "fusion")
+
+    # No checkpoint at all (fresh build) also falls back to config.py.
+    name4, variant4, branch4 = resolve_checkpoint_model_kwargs(None)
+    assert name4 == config.MODEL_NAME
+    assert variant4 == config.MODEL_VARIANT
+    assert branch4 == getattr(config, "BRANCH_MODE", "fusion")
+
+
+def test_resolve_checkpoint_model_kwargs_infers_branch_mode_from_variant():
+    """Regression test: a checkpoint with model_variant but no branch_mode field (e.g. an
+    older checkpoint saved before branch_mode was tracked) must resolve branch_mode from its
+    OWN model_variant, not from the ambient config.BRANCH_MODE - otherwise resolution is
+    non-deterministic across machines/environments where config.py's current BRANCH_MODE
+    happens to differ from what the checkpoint was actually trained with, which previously
+    could even make an otherwise-loadable rgb_only checkpoint fail build_model's own
+    'rgb_only cannot pair with branch_mode=freq' contradiction check purely by accident."""
+    from model import resolve_checkpoint_model_kwargs
+
+    original_branch_mode = getattr(config, "BRANCH_MODE", "fusion")
+    try:
+        ckpt = {"model_state_dict": {}, "configuration": {"model_name": "efficientnet_b0", "model_variant": "rgb_only"}}
+        for unrelated_ambient_value in ["fusion", "freq", "rgb"]:
+            config.BRANCH_MODE = unrelated_ambient_value
+            name, variant, branch = resolve_checkpoint_model_kwargs(ckpt)
+            assert (name, variant, branch) == ("efficientnet_b0", "rgb_only", "rgb"), (
+                f"resolution changed with config.BRANCH_MODE={unrelated_ambient_value!r} - "
+                f"branch_mode inference must be deterministic, independent of ambient config"
+            )
+
+        # fusion_no_attn also has an unambiguous natural branch_mode: 'fusion'.
+        ckpt2 = {"model_state_dict": {}, "configuration": {"model_variant": "fusion_no_attn"}}
+        config.BRANCH_MODE = "rgb"  # deliberately mismatched ambient value
+        _, variant2, branch2 = resolve_checkpoint_model_kwargs(ckpt2)
+        assert (variant2, branch2) == ("fusion_no_attn", "fusion")
+    finally:
+        config.BRANCH_MODE = original_branch_mode
+
+
+def test_resolve_checkpoint_model_kwargs_roundtrips_through_build_and_load():
+    """End-to-end regression test: a checkpoint saved with only model_variant metadata (no
+    branch_mode field) must still reconstruct an architecture whose state_dict keys match
+    exactly, i.e. load_state_dict(strict=True) must succeed without any missing/unexpected
+    keys - proving the inferred branch_mode produces the real, loadable architecture, not
+    just a plausible-looking tuple."""
+    from model import build_model, resolve_checkpoint_model_kwargs
+
+    trained_model = build_model("efficientnet_b0", pretrained=False, model_variant="rgb_only")
+    fake_checkpoint = {
+        "model_state_dict": trained_model.state_dict(),
+        "configuration": {"model_name": "efficientnet_b0", "model_variant": "rgb_only"},
+    }
+
+    model_name, model_variant, branch_mode = resolve_checkpoint_model_kwargs(fake_checkpoint)
+    reconstructed_model = build_model(model_name, pretrained=False, model_variant=model_variant, branch_mode=branch_mode)
+
+    # strict=True (the default) raises RuntimeError on any key mismatch.
+    reconstructed_model.load_state_dict(fake_checkpoint["model_state_dict"])
+
+
+def test_generate_celebdf_manifest_retains_train_and_test_videos(tmp_path):
+    """Regression test for the unified Celeb-DF manifest generator: non-test videos must be
+    retained (labeled split='train'), not silently dropped, matching how evaluate.run_celebdf_eval
+    consumes the manifest (it filters to split=='test' when the column is present). The manifest
+    must also carry group_id and category columns regardless of source layout."""
+    from dataset import generate_celebdf_manifest
+    from PIL import Image
+
+    celeb_root = tmp_path / "Celeb-DF-v2"
+    for category, video_id in [
+        ("Celeb-real", "id0_0000"),
+        ("Celeb-synthesis", "id0_id1_0000"),
+        ("Celeb-synthesis", "id2_id3_0001"),
+    ]:
+        video_dir = celeb_root / category / video_id
+        video_dir.mkdir(parents=True)
+        Image.new("RGB", (8, 8)).save(video_dir / "frame_0000.jpg")
+
+    # Only id0_id1_0000 is on the official test list; the other two videos are non-test.
+    (celeb_root / "List_of_testing_videos.txt").write_text("1 Celeb-synthesis/id0_id1_0000.mp4\n")
+
+    output_path = tmp_path / "celebdf_manifest.csv"
+    df = generate_celebdf_manifest(celeb_root, output_path)
+
+    assert set(df["video_id"]) == {"id0_0000", "id0_id1_0000", "id2_id3_0001"}
+    assert "group_id" in df.columns
+    assert "category" in df.columns
+    assert set(df.loc[df["video_id"] == "id0_id1_0000", "split"]) == {"test"}
+    assert set(df.loc[df["video_id"] == "id0_0000", "split"]) == {"train"}
+    assert set(df.loc[df["video_id"] == "id2_id3_0001", "split"]) == {"train"}
+    assert output_path.exists()
+
+    # Labels: Celeb-real/YouTube-real = 0 (real), Celeb-synthesis = 1 (fake).
+    assert set(df.loc[df["video_id"] == "id0_0000", "label"]) == {0.0}
+    assert set(df.loc[df["video_id"] == "id0_id1_0000", "label"]) == {1.0}
+    assert set(df.loc[df["video_id"] == "id2_id3_0001", "label"]) == {1.0}
+
+    # No duplicate image_path rows.
+    assert not df["image_path"].duplicated().any()
+
+
+def test_generate_celebdf_manifest_raw_video_fallback(tmp_path):
+    """Regression test for the raw-video layout (no pre-extracted image crops present):
+    generate_celebdf_manifest must fall back to OpenCV frame extraction, and the resulting
+    manifest must have the same schema/semantics (label, video_id, category, split, group_id)
+    as the pre-extracted-image layout."""
+    import cv2
+    import numpy as np
+
+    from dataset import generate_celebdf_manifest
+
+    celeb_root = tmp_path / "Celeb-DF-v2-raw"
+    celeb_root.mkdir()
+
+    def _write_tiny_video(path, num_frames=6):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(path), fourcc, 5.0, (32, 32))
+        for i in range(num_frames):
+            writer.write(np.full((32, 32, 3), (i * 20) % 255, dtype=np.uint8))
+        writer.release()
+
+    real_video = celeb_root / "Celeb-real" / "id5_0000.mp4"
+    fake_video = celeb_root / "Celeb-synthesis" / "id5_id6_0000.mp4"
+    _write_tiny_video(real_video)
+    _write_tiny_video(fake_video)
+
+    # id5_id6_0000 is on the official test list; id5_0000 is not.
+    (celeb_root / "List_of_testing_videos.txt").write_text("1 Celeb-synthesis/id5_id6_0000.mp4\n")
+
+    output_path = tmp_path / "celebdf_manifest_raw.csv"
+    df = generate_celebdf_manifest(celeb_root, output_path, max_frames_per_video=3)
+
+    assert len(df) > 0, "Expected the raw-video fallback to extract at least one frame"
+    assert set(df["video_id"]) == {"id5_0000", "id5_id6_0000"}
+    assert "group_id" in df.columns
+    assert set(df.loc[df["video_id"] == "id5_0000", "category"]) == {"Celeb-real"}
+    assert set(df.loc[df["video_id"] == "id5_0000", "label"]) == {0.0}
+    assert set(df.loc[df["video_id"] == "id5_0000", "split"]) == {"train"}
+    assert set(df.loc[df["video_id"] == "id5_id6_0000", "category"]) == {"Celeb-synthesis"}
+    assert set(df.loc[df["video_id"] == "id5_id6_0000", "label"]) == {1.0}
+    assert set(df.loc[df["video_id"] == "id5_id6_0000", "split"]) == {"test"}
+    assert not df["image_path"].duplicated().any()
+    for p in df["image_path"]:
+        assert Path(p).exists(), f"Extracted frame file missing on disk: {p}"
+
+
+def _build_selected_videos_df(video_ids, labels):
+    """Build a synthetic 'selected_videos'-shaped dataframe (video_id, label, group_id),
+    matching exactly what extract_faces.py's main() constructs before face extraction,
+    using the same build_connected_groups logic to derive group_id."""
+    group_map = build_connected_groups(video_ids)
+    return pd.DataFrame({
+        "video_id": video_ids,
+        "label": labels,
+        "group_id": [group_map.get(v, v) for v in video_ids],
+    })
+
+
+def test_validate_selection_splittable_succeeds_for_well_separated_videos():
+    """--sanity-style selection where manipulated videos reference source identities that are
+    NOT among the selected 'original' videos: 3 real (solo) groups + 4 disjoint fake-pair
+    groups = 7 independent groups, comfortably splittable without leakage."""
+    from extract_faces import validate_selection_splittable
+
+    video_ids = ["000", "001", "002", "010_020", "030_040", "050_060", "070_080"]
+    labels = [0, 0, 0, 1, 1, 1, 1]
+    df = _build_selected_videos_df(video_ids, labels)
+
+    # Should not raise.
+    validate_selection_splittable(df, sanity_mode=True)
+
+
+def test_validate_selection_splittable_raises_for_collapsed_connectivity():
+    """Reproduces a plausible --sanity worst case: manipulated videos all pair back to the
+    same small pool of 'original' source identities, so build_connected_groups collapses
+    everything into a single connected component. Verify this is caught with a clear,
+    actionable error (not silently allowed to overlap, and not a confusing crash) - real
+    FaceForensics++ data is not available to test this empirically, so this reproduces the
+    group-structure shape that could plausibly occur, per the code's own connectivity logic."""
+    from extract_faces import validate_selection_splittable
+
+    # 3 real ids (000, 001, 002) + 4 fake videos that all cross-link them into one component:
+    # 000-001, 001-002, 002-000, 000-002 (redundant edges, still one giant component).
+    video_ids = ["000", "001", "002", "000_001", "001_002", "002_000", "000_002"]
+    labels = [0, 0, 0, 1, 1, 1, 1]
+    df = _build_selected_videos_df(video_ids, labels)
+
+    with pytest.raises(ValueError, match="too few unique source video groups"):
+        validate_selection_splittable(df, sanity_mode=True)
+
+
+def test_validate_selection_splittable_appends_sanity_guidance_only_when_requested():
+    """The --sanity-specific remediation guidance must only be appended when sanity_mode=True,
+    so a non-sanity failure (e.g. a genuinely tiny real dataset) isn't misleadingly told to
+    tweak --sanity-specific config knobs."""
+    from extract_faces import validate_selection_splittable
+
+    video_ids = ["000", "001", "002", "000_001", "001_002", "002_000", "000_002"]
+    labels = [0, 0, 0, 1, 1, 1, 1]
+    df = _build_selected_videos_df(video_ids, labels)
+
+    with pytest.raises(ValueError, match="MAX_CANDIDATE_VIDEOS_PER_CATEGORY"):
+        validate_selection_splittable(df, sanity_mode=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_selection_splittable(df, sanity_mode=False)
+    assert "MAX_CANDIDATE_VIDEOS_PER_CATEGORY" not in str(excinfo.value)
+
+
+def test_dataloader_worker_init_fn_is_deterministic_and_distinct_per_worker():
+    """Regression test for the worker_init_fn module-scope fix: worker seeding must be
+    reproducible (same torch base seed + same worker_id => identical resulting RNG state)
+    while still giving different workers distinct RNG streams."""
+    import pickle
+    import random as random_module
+    from dataset import _dataloader_worker_init_fn
+
+    def _capture_state(worker_id):
+        _dataloader_worker_init_fn(worker_id)
+        # pickle.dumps for a deep, order-sensitive, hashable comparison - np.random.get_state()
+        # returns a tuple containing an ndarray, whose == produces an elementwise array (not a
+        # scalar bool), so a naive tuple `==` comparison raises ValueError.
+        return pickle.dumps((random_module.getstate(), np.random.get_state()))
+
+    torch.manual_seed(999)
+    state_w0_run1 = _capture_state(0)
+    state_w1_run1 = _capture_state(1)
+
+    torch.manual_seed(999)
+    state_w0_run2 = _capture_state(0)
+    state_w1_run2 = _capture_state(1)
+
+    assert state_w0_run1 == state_w0_run2, "same base seed + worker_id must reproduce identical RNG state"
+    assert state_w1_run1 == state_w1_run2
+    assert state_w0_run1 != state_w1_run1, "different worker_id must get a distinct RNG stream"
+
+
+def test_dataloader_worker_init_fn_picklable_under_explicit_spawn_context(tmp_path):
+    """Regression test for the worker_init_fn module-scope fix: verify the DataLoader
+    actually works with num_workers > 0 under an EXPLICIT 'spawn' multiprocessing context
+    (rather than relying on whichever start method the current OS/Python version happens to
+    default to - spawn is the default on Windows and macOS, and as of Python 3.14 also on
+    non-macOS POSIX). A local closure worker_init_fn would raise
+    'Can't pickle local object' here; the module-scope function must not."""
+    from torchvision import transforms as T
+    from PIL import Image
+    from dataset import DeepfakeImageDataset, _dataloader_worker_init_fn
+
+    paths = []
+    for i in range(6):
+        p = tmp_path / f"img_{i}.jpg"
+        Image.new("RGB", (16, 16), color=(i * 30 % 255, 0, 0)).save(p)
+        paths.append(str(p))
+
+    df = pd.DataFrame({
+        "image_path": paths,
+        "video_id": [f"v{i}" for i in range(6)],
+        "label": [i % 2 for i in range(6)],
+    })
+
+    dataset = DeepfakeImageDataset(df, T.Compose([T.ToTensor()]))
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=2,
+        num_workers=2,
+        worker_init_fn=_dataloader_worker_init_fn,
+        multiprocessing_context="spawn",
+        shuffle=False,
+    )
+
+    batches = list(loader)
+    assert len(batches) == 3
+    assert all(b["image"].shape == (2, 3, 16, 16) for b in batches)

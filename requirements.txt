@@ -1,11 +1,20 @@
 # Deepfake Detection Robustness Benchmarking Dependencies (Pinned for Reproducibility)
-torch>=2.0.0,<2.6.0
-torchvision>=0.15.0,<0.21.0
+#
+# Tested and CI-supported on Python 3.10-3.12 (CI pins 3.11). The torch/torchvision pins
+# below are split by Python version marker: no torch<2.6 wheel exists for Python >=3.13, so
+# pinning a single tight range would make `pip install -r requirements.txt` fail outright on
+# newer interpreters. Python 3.13+ therefore installs a newer, untested-by-this-project torch
+# instead of failing to install at all; if you hit issues there, install Python 3.11 and retry.
+torch>=2.0.0,<2.6.0; python_version < "3.13"
+torch>=2.6.0; python_version >= "3.13"
+torchvision>=0.15.0,<0.21.0; python_version < "3.13"
+torchvision>=0.21.0; python_version >= "3.13"
 numpy>=1.24.0,<2.0.0
 pandas>=2.0.0,<3.0.0
 scikit-learn>=1.2.0,<1.6.0
 opencv-python-headless>=4.7.0,<5.0.0
-Pillow>=9.5.0,<11.0.0
+Pillow>=9.5.0,<11.0.0; python_version < "3.13"
+Pillow>=11.0.0; python_version >= "3.13"
 tqdm>=4.65.0,<5.0.0
 matplotlib>=3.7.0,<4.0.0
 pytest>=7.3.0,<9.0.0
