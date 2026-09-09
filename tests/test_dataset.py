@@ -5,7 +5,7 @@ Unit tests for Dataset splitting logic to guarantee zero video_id / group_id lea
 import pytest
 import pandas as pd
 import numpy as np
-from src.datasets.dataset import assign_group_splits
+from deepfake_robustness.datasets.dataset import assign_group_splits
 
 def test_zero_group_leakage_across_splits():
     """Verify assign_group_splits guarantees zero group_id leakage across train, val, and test splits."""

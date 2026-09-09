@@ -13,9 +13,9 @@ from streamlit_image_comparison import image_comparison
 root_dir = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(root_dir))
 
-from src.configs import config
-from src.models.model import build_model
-from src.degradations.transforms import RandomJPEGCompression, RandomDownscaleRestore, RandomGaussianNoise, RandomMotionBlur, RandomSharpen
+from deepfake_robustness.configs import config
+from deepfake_robustness.models.model import build_model
+from deepfake_robustness.degradations.transforms import RandomJPEGCompression, RandomDownscaleRestore, RandomGaussianNoise, RandomMotionBlur, RandomSharpen
 
 # Page config
 st.set_page_config(page_title="Deepfake Vibe Check", page_icon="🔮", layout="wide")
@@ -93,9 +93,9 @@ with st.sidebar:
     sharp_f = st.slider("Sharpen", 1.0, 3.0, 1.0, 0.2, help="Higher = excessive sharpening")
 
 
-from src.evaluation.gradcam import generate_gradcam, get_target_layer, overlay_heatmap
-from src.evaluation.evaluate import load_model_from_checkpoint
-from src.degradations.transforms import get_transforms
+from deepfake_robustness.evaluation.gradcam import generate_gradcam, get_target_layer, overlay_heatmap
+from deepfake_robustness.evaluation.evaluate import load_model_from_checkpoint
+from deepfake_robustness.degradations.transforms import get_transforms
 
 @st.cache_resource
 def load_models(model_name_choice="EfficientNet-B0"):
@@ -184,8 +184,29 @@ def apply_all_degradations(img):
 
 
 
+def extract_face(img):
+    try:
+        from facenet_pytorch import MTCNN
+        mtcnn = MTCNN(keep_all=False, select_largest=True)
+        boxes, _ = mtcnn.detect(img)
+        if boxes is not None:
+            box = boxes[0]
+            x1, y1, x2, y2 = [int(v) for v in box]
+            w, h = x2 - x1, y2 - y1
+            # Add some margin
+            margin = int(0.2 * max(w, h))
+            x1 = max(0, x1 - margin)
+            y1 = max(0, y1 - margin)
+            x2 = min(img.width, x2 + margin)
+            y2 = min(img.height, y2 + margin)
+            return img.crop((x1, y1, x2, y2))
+    except ImportError:
+        pass
+    return img
+
 if uploaded_file:
     orig_img = Image.open(uploaded_file).convert("RGB")
+    orig_img = extract_face(orig_img)
     deg_img = apply_all_degradations(orig_img)
 
     t1, t2, t3 = st.tabs(["👁️ VISION", "📈 TELEMETRY", "🔍 EXPLAINER"])

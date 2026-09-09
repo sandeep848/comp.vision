@@ -13,9 +13,9 @@ from sklearn.model_selection import cross_val_score
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from src.configs import config
-from src.degradations.transforms import RandomJPEGCompression, RandomDownscaleRestore, get_transforms
-from src.evaluation.evaluate import load_model_from_checkpoint
+from deepfake_robustness.configs import config
+from deepfake_robustness.degradations.transforms import RandomJPEGCompression, RandomDownscaleRestore, get_transforms
+from deepfake_robustness.evaluation.evaluate import load_model_from_checkpoint
 
 def calculate_ssim(img1, img2):
     arr1 = np.array(img1)
@@ -68,6 +68,8 @@ def run_phase1():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     manifest_df = pd.read_csv(config.MANIFEST_PATH)
+    if "split" in manifest_df.columns:
+        manifest_df = manifest_df[manifest_df["split"] == "val"]
     frames = manifest_df['image_path'].tolist()
     random.seed(config.SEED)
     random.shuffle(frames)
@@ -86,14 +88,14 @@ def run_phase1():
     features_X = []
     labels_y = []
     
-    jpeg_a = RandomJPEGCompression(quality_range=(50, 50), probability=1.0)
-    downscale_a = RandomDownscaleRestore(scales=[0.5], probability=1.0)
+    jpeg_a = RandomJPEGCompression(quality_range=(70, 70), probability=1.0)
+    downscale_a = RandomDownscaleRestore(scales=[0.75], probability=1.0)
     pipeline_a_ops = [jpeg_a, downscale_a]
     
     for idx, path in enumerate(tqdm(frames)):
         orig_img = Image.open(path).convert("RGB")
         img_a = apply_pipeline(orig_img, pipeline_a_ops)
-        img_b, _, _ = tune_pipeline_b(orig_img, img_a, base_scale=0.5)
+        img_b, _, _ = tune_pipeline_b(orig_img, img_a, base_scale=0.75)
         
         t_a = eval_transform(img_a).unsqueeze(0).to(device)
         t_b = eval_transform(img_b).unsqueeze(0).to(device)

@@ -18,9 +18,9 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.configs import config  # noqa: E402
-from src.models.model import build_model  # noqa: E402
-from src.training.train import set_seed  # noqa: E402
+from deepfake_robustness.configs import config  # noqa: E402
+from deepfake_robustness.models.model import build_model  # noqa: E402
+from deepfake_robustness.training.train import set_seed  # noqa: E402
 
 
 def test_end_to_end_smoke(tmp_path):
@@ -70,7 +70,7 @@ def test_end_to_end_smoke(tmp_path):
 
     result = subprocess.run(
         [
-            sys.executable, str(REPO_ROOT / "src/training/train.py"),
+            sys.executable, str(REPO_ROOT / "src/deepfake_robustness/training/train.py"),
             "--manifest", str(manifest_path),
             "--limit_batches", "1",
             "--epochs", "1",

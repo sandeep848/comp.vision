@@ -1,6 +1,6 @@
 # Phase 5: Final Evaluation Report
 
-This report summarizes the experimental outcomes for the **CoRe-DF** (Compositional Robustness for Deepfakes) architecture. After executing the complete pipeline—from establishing the clean baseline to training the dynamic, modular expert architecture on 92,352 compositional pipelines—the evaluation results on the held-out test set are conclusive.
+This report summarizes the experimental outcomes for the **CoRe-DF** (Compositional Robustness for Deepfakes) architecture. After executing the complete pipeline—from establishing the clean baseline to training the dynamic, modular expert architecture on exactly 92,352 frames mapped to 37 unique compositional pipelines—the evaluation results on the held-out test set are conclusive.
 
 ## Metric Summary (Video-level ROC-AUC)
 

@@ -14,13 +14,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 import torch
 from torch.utils.data import DataLoader
 
-from src.configs import config
-from src.datasets.dataset import DeepfakeImageDataset
-from src.datasets.dataset import generate_celebdf_manifest, validate_celebdf_manifest
-from src.degradations.transforms import get_transforms
-from src.models.model import build_model, resolve_checkpoint_model_kwargs
-from src.training.train import evaluate_model, DeepfakeLoss
-from src.evaluation.metrics_utils import (
+from deepfake_robustness.configs import config
+from deepfake_robustness.datasets.dataset import DeepfakeImageDataset
+from deepfake_robustness.datasets.dataset import generate_celebdf_manifest, validate_celebdf_manifest
+from deepfake_robustness.degradations.transforms import get_transforms
+from deepfake_robustness.models.model import build_model, resolve_checkpoint_model_kwargs
+from deepfake_robustness.training.train import evaluate_model, DeepfakeLoss
+from deepfake_robustness.evaluation.metrics_utils import (
     bootstrap_video_level_ci,
     paired_video_bootstrap_test,
     calculate_ece,
@@ -132,7 +132,7 @@ def run_comparative_benchmark(n_bootstraps=1000, limit_batches=None):
 
     manifest_df = pd.read_csv(config.MANIFEST_PATH)
     if "split" not in manifest_df.columns:
-        from src.datasets.dataset import assign_group_splits
+        from deepfake_robustness.datasets.dataset import assign_group_splits
         manifest_df = assign_group_splits(manifest_df, seed=config.SEED)
     test_df = manifest_df[manifest_df["split"] == "test"].copy()
     _, eval_transform = get_transforms()

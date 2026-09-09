@@ -24,11 +24,11 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from src.configs import config
-from src.datasets.dataset import get_dataloaders, assign_group_splits, validate_manifest
-from src.models.model import build_model, resolve_checkpoint_model_kwargs
-from src.degradations.transforms import get_degradation_transform_for_epoch
-from src.evaluation.metrics_utils import compute_video_level_metrics
+from deepfake_robustness.configs import config
+from deepfake_robustness.datasets.dataset import get_dataloaders, assign_group_splits, validate_manifest
+from deepfake_robustness.models.model import build_model, resolve_checkpoint_model_kwargs
+from deepfake_robustness.degradations.transforms import get_degradation_transform_for_epoch
+from deepfake_robustness.evaluation.metrics_utils import compute_video_level_metrics
 
 class DeepfakeLoss(nn.Module):
     def __init__(self, loss_type="focal", alpha=0.50, gamma=1.5, smoothing=0.05, class_weights=None):
@@ -492,40 +492,51 @@ def evaluate_model(model, loader, criterion, device, limit_batches=None, use_tta
 
         if use_tta:
             # Original
-            logits1, _ = model(images)
-            probs1 = torch.sigmoid(logits1.squeeze(1))
+            out1 = model(images)
+            logits1 = out1["deepfake_logit"].squeeze(1) if isinstance(out1, dict) else out1[0].squeeze(1)
+            probs1 = torch.sigmoid(logits1)
             
             # Horizontal Flip
             images_hf = torch.flip(images, [3])
-            logits2, _ = model(images_hf)
-            probs2 = torch.sigmoid(logits2.squeeze(1))
+            out2 = model(images_hf)
+            logits2 = out2["deepfake_logit"].squeeze(1) if isinstance(out2, dict) else out2[0].squeeze(1)
+            probs2 = torch.sigmoid(logits2)
             
             # Mild Resize
             images_res = torch.nn.functional.interpolate(images, scale_factor=0.9, mode='bilinear', align_corners=False)
             images_res = torch.nn.functional.interpolate(images_res, size=images.shape[2:], mode='bilinear', align_corners=False)
-            logits3, _ = model(images_res)
-            probs3 = torch.sigmoid(logits3.squeeze(1))
+            out3 = model(images_res)
+            logits3 = out3["deepfake_logit"].squeeze(1) if isinstance(out3, dict) else out3[0].squeeze(1)
+            probs3 = torch.sigmoid(logits3)
             
             probabilities = (probs1 + probs2 + probs3) / 3.0
             probs_clamped = torch.clamp(probabilities, 1e-6, 1.0 - 1e-6)
             logits = torch.logit(probs_clamped)
-            loss = criterion(logits, labels)
+            
+            if isinstance(out1, dict):
+                if hasattr(criterion, 'forward') and 'outputs_dict' in criterion.forward.__code__.co_varnames:
+                    loss = criterion({"deepfake_logit": logits.unsqueeze(1)}, labels)
+                else:
+                    loss = criterion(logits, labels)
+            else:
+                loss = criterion(logits, labels)
         else:
             with torch.amp.autocast(device_type="cuda") if device.type == "cuda" else torch.autocast(device_type="cpu"):
                 outputs = model(images)
                 if isinstance(outputs, dict):
                     logits = outputs["deepfake_logit"].squeeze(1)
-                    loss = criterion(outputs, labels)
+                    if hasattr(criterion, 'forward') and 'outputs_dict' in criterion.forward.__code__.co_varnames:
+                        loss = criterion(outputs, labels)
+                    else:
+                        loss = criterion(logits, labels)
                 else:
-                    logits, _ = outputs
-                    logits = logits.squeeze(1)
+                    logits = outputs[0].squeeze(1)
                     loss = criterion(logits, labels)
-            
-        probabilities = torch.sigmoid(logits)
+            probabilities = torch.sigmoid(logits)
 
         running_loss += loss.item() * images.size(0)
         all_labels.extend(labels.cpu().numpy().tolist())
-        all_probabilities.extend(probabilities.cpu().numpy().tolist())
+        all_probabilities.extend(probabilities.float().cpu().numpy().tolist())
         all_paths.extend(batch["path"])
         all_video_ids.extend(batch["video_id"])
         all_manipulations.extend(batch.get("manipulation", ["unknown"] * len(batch["path"])))
@@ -1092,8 +1103,15 @@ def main():
         )
 
         
+        # Determine which model to evaluate
+        eval_model = ema.module if ema is not None else model
+        
+        # Update BatchNorm stats for EMA before evaluation
+        if ema is not None:
+            torch.optim.swa_utils.update_bn(train_loader, ema, device=device)
+
         val_metrics, val_predictions_df = evaluate_model(
-            model=model,
+            model=eval_model,
             loader=val_loader,
             criterion=criterion,
             device=device,

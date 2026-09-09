@@ -9,8 +9,8 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
-from src.configs import config
-from src.degradations.transforms import get_transforms
+from deepfake_robustness.configs import config
+from deepfake_robustness.degradations.transforms import get_transforms
 
 
 def _dataloader_worker_init_fn(worker_id):
@@ -26,10 +26,13 @@ def _dataloader_worker_init_fn(worker_id):
 
 
 class DeepfakeImageDataset(Dataset):
-    def __init__(self, dataframe, transform, image_modifier=None):
+    def __init__(self, dataframe, geometric_transform=None, tensor_norm=None, eval_transform=None, split="train", random_degradation=None):
         self.dataframe = dataframe.reset_index(drop=True).copy()
-        self.transform = transform
-        self.image_modifier = image_modifier
+        self.geometric_transform = geometric_transform
+        self.tensor_norm = tensor_norm
+        self.eval_transform = eval_transform
+        self.split = split
+        self.random_degradation = random_degradation
 
     def __len__(self):
         return len(self.dataframe)
@@ -43,16 +46,29 @@ class DeepfakeImageDataset(Dataset):
         except Exception as error:
             raise RuntimeError(f"Could not load image: {image_path}") from error
 
-        if self.image_modifier is not None:
-            try:
-                image = self.image_modifier(image, image_path=str(image_path))
-            except TypeError:
-                image = self.image_modifier(image)
+        if self.split == "train":
+            # 1. Base geometric augmentations (identical for both models)
+            if self.geometric_transform:
+                image = self.geometric_transform(image)
+                
+            # 2. Add degradation operations
+            pipeline_id = row.get("pipeline_id", "clean")
+            if pipeline_id and pipeline_id != "clean":
+                from deepfake_robustness.degradations.pipeline_registry import build_pipeline
+                ops = build_pipeline(pipeline_id)
+                for op in ops:
+                    image = op(image)
+            elif self.random_degradation:
+                image = self.random_degradation(image)
+                
+            if self.tensor_norm:
+                image = self.tensor_norm(image)
+        else:
+            if self.eval_transform:
+                image = self.eval_transform(image)
 
-        image = self.transform(image)
         label = torch.tensor(float(row["label"]), dtype=torch.float32)
-
-        manipulation = str(row["manipulation"]) if "manipulation" in row else (str(row["category"]) if "category" in row else "unknown")
+        manipulation = str(row.get("manipulation", row.get("category", "unknown")))
 
         return {
             "image": image,
@@ -61,7 +77,6 @@ class DeepfakeImageDataset(Dataset):
             "video_id": row["video_id"],
             "manipulation": manipulation,
         }
-
 
 
 
@@ -127,7 +142,7 @@ def assign_group_splits(dataframe, train_ratio=None, validation_ratio=None, seed
         validation_ratio = getattr(config, "VAL_RATIO", 0.15)
     dataframe = dataframe.copy()
 
-    if "group_id" not in dataframe.columns and "video_id" in dataframe.columns:
+    if "video_id" in dataframe.columns:
         group_map = build_connected_groups(dataframe["video_id"].unique())
         dataframe["group_id"] = dataframe["video_id"].map(
             lambda v: group_map.get(str(v).split('.')[0], str(v))
@@ -501,11 +516,17 @@ def get_dataloaders(manifest_df):
                 replacement=True
             )
 
-    train_transform, eval_transform = get_transforms()
-
-    train_dataset = DeepfakeImageDataset(train_df, train_transform)
-    val_dataset = DeepfakeImageDataset(val_df, eval_transform)
-    test_dataset = DeepfakeImageDataset(test_df, eval_transform)
+    geometric_transform, tensor_norm, eval_transform = get_transforms()
+    
+    from deepfake_robustness.degradations.transforms import get_degradation_transform_for_epoch
+    random_deg = None
+    if config.TRAINING_STRATEGY == "degradation" and "pipeline_id" not in train_df.columns:
+        # We need the custom random degradation without the geometric parts since they are split now!
+        random_deg = get_degradation_transform_for_epoch(1, 1) # Assuming static for now, or handled by training loop
+        
+    train_dataset = DeepfakeImageDataset(train_df, geometric_transform=geometric_transform, tensor_norm=tensor_norm, split="train", random_degradation=random_deg)
+    val_dataset = DeepfakeImageDataset(val_df, eval_transform=eval_transform, split="val")
+    test_dataset = DeepfakeImageDataset(test_df, eval_transform=eval_transform, split="test")
 
     train_loader = DataLoader(
         train_dataset,

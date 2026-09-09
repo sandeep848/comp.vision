@@ -14,10 +14,10 @@ import pytest
 import torch
 from PIL import Image
 
-from src.configs import config
-from src.models.model import build_model
-from src.degradations.transforms import get_transforms
-from src.evaluation.gradcam import (
+from deepfake_robustness.configs import config
+from deepfake_robustness.models.model import build_model
+from deepfake_robustness.degradations.transforms import get_transforms
+from deepfake_robustness.evaluation.gradcam import (
     GradCAM,
     get_target_layer,
     generate_gradcam,
@@ -26,7 +26,7 @@ from src.evaluation.gradcam import (
     _safe_normalize,
     run_single_visualization,
 )
-from src.evaluation.evaluate import load_model_from_checkpoint
+from deepfake_robustness.evaluation.evaluate import load_model_from_checkpoint
 
 
 def _make_input(size=256, batch=1):

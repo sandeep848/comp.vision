@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
 
-from src.configs import config
-from src.models.core_df import ModularExpertHead, OrderInferenceModule, OrderConditionedFusion
+from deepfake_robustness.configs import config
+from deepfake_robustness.models.core_df import ModularExpertHead, OrderInferenceModule, OrderConditionedFusion, DynamicRouter
 
 class MultiScaleSRMLayer(nn.Module):
     """
@@ -266,19 +266,23 @@ class DeepfakeModel(nn.Module):
         # CoRe-DF Modular Architecture Components
         if self.model_variant == "modular_order":
             self.num_experts = 6 # jpeg, downscale, motion_blur, gaussian_blur, gaussian_noise, sharpen
-            # 1. Modular Expert Heads (taking SFCA-attended RGB map as input)
+            
+            # 1. Dynamic Routing Gating Network
+            self.router = DynamicRouter(feature_dim=rgb_features + freq_features, num_experts=self.num_experts, top_k=2)
+            
+            # 2. Modular Expert Heads (taking SFCA-attended RGB map as input)
             self.expert_heads = nn.ModuleList([
-                ModularExpertHead(in_channels=rgb_features) for _ in range(self.num_experts)
+                ModularExpertHead(in_channels=rgb_features, reduced_dim=64) for _ in range(self.num_experts)
             ])
             
-            # 2. Order Inference Module (takes global pooled RGB+SRM features)
+            # 3. Order Inference Module (takes global pooled RGB+SRM features)
             self.order_inference = OrderInferenceModule(feature_dim=rgb_features + freq_features, num_experts=self.num_experts)
             
-            # 3. Order-Conditioned Fusion
-            self.order_fusion = OrderConditionedFusion(expert_feature_dim=rgb_features)
+            # 4. Order-Conditioned Fusion
+            self.order_fusion = OrderConditionedFusion(expert_feature_dim=64)
             
-            # Final Classification Head takes the fused expert features
-            total_features = rgb_features
+            # Final Classification Head takes the fused expert features (64-dim)
+            total_features = 64
         else:
             # Standard Fusion & Classification Head
             if self.branch_mode == "rgb" or self.model_variant == "rgb_only":
@@ -343,24 +347,26 @@ class DeepfakeModel(nn.Module):
                 freq_f = F.adaptive_avg_pool2d(freq_map, 1).flatten(1)
                 global_fused = torch.cat([rgb_f, freq_f], dim=1)
                 
-                # 1. Order Inference
-                order_embs, order_logits = self.order_inference(global_fused)
+                # 1. Dynamic Routing
+                top_k_weights, top_k_indices, routing_weights = self.router(global_fused)
                 
-                # 2. Modular Expert Heads
-                expert_out_list = []
-                for head in self.expert_heads:
-                    expert_out_list.append(head(attended_rgb_map))
-                expert_features = torch.stack(expert_out_list, dim=1) # (B, num_experts, rgb_features)
+                # 2. Order Inference and Validity
+                order_embs, order_logits, expert_validity_scores = self.order_inference(global_fused)
                 
-                # 3. Order-Conditioned Fusion
-                fused = self.order_fusion(expert_features, order_embs)
+                # 3. Modular Expert Heads (Sparse Execution)
+                B = x.size(0)
+                expert_features = torch.zeros(B, self.num_experts, 64, device=x.device)
+                for i in range(self.num_experts):
+                    mask = (top_k_indices == i).any(dim=-1)
+                    if mask.any():
+                        expert_out = self.expert_heads[i](attended_rgb_map[mask])
+                        expert_features[mask, i] = expert_out
                 
-                # 4. Final Classification
+                # 4. Order-Conditioned Fusion
+                fused = self.order_fusion(expert_features, order_embs, top_k_weights, top_k_indices)
+                
+                # 5. Final Classification
                 out, feat = self.head(fused)
-                
-                # Create fake validity scores (expert validity scores could be derived from expert embeddings)
-                # Since not strictly defined yet, we return ones as placeholder for validity loss
-                expert_validity_scores = torch.ones(x.size(0), self.num_experts, device=x.device)
                 
                 return {
                     "deepfake_logit": out,

@@ -11,8 +11,8 @@ import zipfile
 import subprocess
 import pandas as pd
 
-from src.configs import config
-from src.datasets.dataset import generate_celebdf_manifest, validate_celebdf_manifest
+from deepfake_robustness.configs import config
+from deepfake_robustness.datasets.dataset import generate_celebdf_manifest, validate_celebdf_manifest
 
 GDRIVE_FILE_ID = "1iLx76wsbi9itnkxSqz9BVBl4ZvnbIazj"
 GDRIVE_URL = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"

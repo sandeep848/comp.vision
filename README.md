@@ -46,60 +46,62 @@ flowchart TD
 ## 🚀 Execution Guide & Command Reference
 
 ### 1. Environment Setup
-Tested and CI-supported on **Python 3.10–3.12** (CI pins 3.11). Python 3.13+ is installable
-(`requirements.txt` uses version markers to select compatible torch/torchvision/Pillow builds)
-but is not exhaustively tested by this project.
+Tested and CI-supported on **Python 3.10–3.12** (CI pins 3.11). Python 3.13+ is installable.
+Install the package and its dependencies using `pyproject.toml`:
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev,app,face_extraction]"
 ```
 
 ### 2. Dataset Acquisition
 Download the FaceForensics++ video sequences (`c23` compression tier):
 ```bash
-python -m src.datasets.download-FaceForensics datasets/FaceForensics -t videos
+python -m deepfake_robustness.datasets.download-FaceForensics datasets/FaceForensics -t videos
 ```
-*(Optionally, use `python -m src.datasets.download_celebdf` to download the Celeb-DF v2 dataset for cross-dataset generalization testing).*
+*(Optionally, use `python -m deepfake_robustness.datasets.download_celebdf` to download the Celeb-DF v2 dataset for cross-dataset generalization testing).*
 
 ### 3. Face Extraction & Group Stratification
 Extract aligned 256x256 face crops with MTCNN and zero-leakage group assignment.
-*(Pass `--sanity` to run a fast extraction on a small (up to ~16-video) debugging sample. It
-fails fast with an actionable error, before running face extraction, if the sampled videos'
-source identities happen to connect into too few independent groups to form a leakage-free
-split — see "Strict Leakage Enforcement" below).*
+*(Pass `--sanity` to run a fast extraction on a small debugging sample).*
 ```bash
-python -m src.datasets.extract_faces
+deepfake-extract
 ```
+*(Or run `python -m deepfake_robustness.datasets.extract_faces`)*
 
 ### 4. Model Training
 **Train Standard Baseline Model (Clean Data):**
 ```bash
-python -m src.training.train --model efficientnet_b0 --strategy clean --epochs 30 --batch_size 32
+deepfake-train --model efficientnet_b0 --strategy clean --epochs 30 --batch_size 32
 ```
 
 **Train Robustness-Aware Model (Degradation Augmentations):**
 ```bash
-python -m src.training.train --model efficientnet_b0 --strategy degradation --epochs 30 --batch_size 32
+deepfake-train --model efficientnet_b0 --strategy degradation --epochs 30 --batch_size 32
 ```
 
 ### 5. Comparative Evaluation Benchmark
 Run the complete 15-tier benchmark suite (Bootstrap CI, ROC-AUC, ECE):
 ```bash
-python -m src.evaluation.evaluate --mode comparative --bootstraps 1000
+deepfake-evaluate --mode comparative --bootstraps 1000
 ```
-*(To monitor training live, use: `tensorboard --logdir=deepfake_robustness/outputs/runs`)*
+*(To monitor training live, use: `tensorboard --logdir=outputs/runs`)*
 
 ### 6. Grad-CAM Interpretability
 
 Grad-CAM (`gradcam.py`) is a **secondary, inference-only** interpretability layer on top of
-already-trained checkpoints. It does not affect training, the model architecture, the
-train/val/test split, or the main quantitative robustness metrics in any way.
+already-trained checkpoints.
 
 **Single image, single model:**
 ```bash
-python -m src.evaluation.gradcam \
-  --checkpoint deepfake_robustness/outputs/efficientnet_b0_clean/best_model.pt \
+deepfake-gradcam \
+  --checkpoint outputs/efficientnet_b0_clean/best_model.pt \
   --image path/to/face.jpg \
-  --output deepfake_robustness/outputs/gradcam_example.png
+  --output outputs/gradcam_example.png
+```
+
+### 7. Interactive Streamlit App
+Run the interactive interface to test images:
+```bash
+deepfake-app
 ```
 Produces `Original face | Grad-CAM heatmap | Heatmap overlay` plus a JSON metadata sidecar
 (`gradcam_example.json`) recording the checkpoint, model variant, degradation, predicted class,

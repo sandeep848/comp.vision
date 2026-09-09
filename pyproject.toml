@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepfake_robustness"
+version = "0.1.0"
+description = "Compositional Robustness for Deepfake Detection"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "opencv-python-headless",
+    "Pillow",
+    "tqdm",
+    "matplotlib"
+]
+
+[project.optional-dependencies]
+face_extraction = [
+    "facenet-pytorch"
+]
+app = [
+    "streamlit",
+    "plotly",
+    "streamlit-image-comparison"
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "pre-commit"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

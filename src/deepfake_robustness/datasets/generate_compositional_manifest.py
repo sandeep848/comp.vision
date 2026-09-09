@@ -5,7 +5,7 @@ import random
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from src.configs import config
+from deepfake_robustness.configs import config
 
 def generate_manifest():
     print("[Phase 2] Generating Compositional Manifest...")

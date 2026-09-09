@@ -7,7 +7,7 @@ from PIL import Image, ImageEnhance
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
-from src.configs import config
+from deepfake_robustness.configs import config
 
 class RandomJPEGCompression:
     def __init__(self, quality_range=(50, 95), probability=0.75):
@@ -100,42 +100,25 @@ def get_transforms():
     IMAGENET_MEAN = [0.485, 0.456, 0.406]
     IMAGENET_STD = [0.229, 0.224, 0.225]
 
-    clean_transform = transforms.Compose([
-        transforms.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), interpolation=InterpolationMode.BICUBIC),
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ])
-
-    standard_transform = transforms.Compose([
+    geometric_transform = transforms.Compose([
         transforms.RandomResizedCrop(config.IMAGE_SIZE, scale=(0.85, 1.0), ratio=(0.95, 1.05), interpolation=InterpolationMode.BICUBIC),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02),
-        transforms.RandomApply([
-            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))
-        ], p=getattr(config, "AUG_BLUR_PROB", 0.20)),
+        transforms.RandomAffine(degrees=3, translate=(0.02, 0.02), scale=(0.98, 1.02), interpolation=InterpolationMode.BILINEAR),
+    ])
+
+    tensor_norm = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
 
-    degradation_transform = _build_degradation_transform(severity_scale=1.0)
-
-    evaluation_transform = transforms.Compose([
+    eval_transform = transforms.Compose([
         transforms.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
 
-    training_transforms = {
-        "clean": clean_transform,
-        "standard": standard_transform,
-        "degradation": degradation_transform,
-    }
-
-    if config.TRAINING_STRATEGY not in training_transforms:
-        raise ValueError(f"Invalid TRAINING_STRATEGY: {config.TRAINING_STRATEGY}")
-
-    return training_transforms[config.TRAINING_STRATEGY], evaluation_transform
-
+    return geometric_transform, tensor_norm, eval_transform
 
 class RandomDegradationChoice:
     """Randomly selects 1 (or at most 2) degradation operations per image sample
@@ -210,14 +193,7 @@ def _build_degradation_transform(severity_scale: float = 1.0):
         getattr(config, "AUG_SHARPEN_PROB", 0.05),
     ]
 
-    return transforms.Compose([
-        transforms.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), interpolation=InterpolationMode.BICUBIC),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomAffine(degrees=3, translate=(0.02, 0.02), scale=(0.98, 1.02), interpolation=InterpolationMode.BILINEAR),
-        RandomDegradationChoice(degradation_ops, weights=weights, p_clean=max(0.25, 0.50 - 0.25 * s)),
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ])
+    return RandomDegradationChoice(degradation_ops, weights=weights, p_clean=max(0.25, 0.50 - 0.25 * s))
 
 
 def get_degradation_transform_for_epoch(epoch: int, num_epochs: int) -> "transforms.Compose":

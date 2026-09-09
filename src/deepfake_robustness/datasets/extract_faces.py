@@ -10,8 +10,8 @@ from tqdm import tqdm
 import torch
 from facenet_pytorch import MTCNN
 
-from src.configs import config
-from src.datasets.dataset import build_connected_groups, assign_group_splits
+from deepfake_robustness.configs import config
+from deepfake_robustness.datasets.dataset import build_connected_groups, assign_group_splits
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
 
