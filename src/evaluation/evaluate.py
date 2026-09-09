@@ -7,6 +7,10 @@ import pandas as pd
 from PIL import Image, ImageFilter, ImageEnhance
 import cv2
 
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 import torch
 from torch.utils.data import DataLoader
 
@@ -128,7 +132,7 @@ def run_comparative_benchmark(n_bootstraps=1000, limit_batches=None):
 
     manifest_df = pd.read_csv(config.MANIFEST_PATH)
     if "split" not in manifest_df.columns:
-        from datasets.dataset import assign_group_splits
+        from src.datasets.dataset import assign_group_splits
         manifest_df = assign_group_splits(manifest_df, seed=config.SEED)
     test_df = manifest_df[manifest_df["split"] == "test"].copy()
     _, eval_transform = get_transforms()
@@ -175,6 +179,20 @@ def run_comparative_benchmark(n_bootstraps=1000, limit_batches=None):
 
         assert (std_preds["image_path"].to_numpy() == rob_preds["image_path"].to_numpy()).all(), "Paired evaluation image path mismatch!"
         assert (std_preds["label"].to_numpy() == rob_preds["label"].to_numpy()).all(), "Paired evaluation label mismatch!"
+
+        # Persist predictions
+        std_preds_out = std_preds.copy()
+        std_preds_out["tier"] = tier_name
+        std_preds_out["checkpoint"] = "standard"
+        std_preds_out["abstain"] = False # Replace with logic if abstain is added
+        
+        rob_preds_out = rob_preds.copy()
+        rob_preds_out["tier"] = tier_name
+        rob_preds_out["checkpoint"] = "robustness"
+        rob_preds_out["abstain"] = False
+
+        std_preds_out.to_csv(raw_preds_dir / f"preds_std_{tier_name.replace(' ', '_')}.csv", index=False)
+        rob_preds_out.to_csv(raw_preds_dir / f"preds_rob_{tier_name.replace(' ', '_')}.csv", index=False)
 
         std_vid = compute_video_level_metrics(std_preds, threshold=std_thresh)
         rob_vid = compute_video_level_metrics(rob_preds, threshold=rob_thresh)

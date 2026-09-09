@@ -8,6 +8,10 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 import torch
 import torch.nn as nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
@@ -66,7 +70,44 @@ class DeepfakeLoss(nn.Module):
             
         return loss.mean()
 
-
+class CoReDFLoss(nn.Module):
+    """
+    Composite loss function for CoRe-DF architecture.
+    Loss = L_classification + 0.5 * L_order + 0.5 * L_validity + 0.1 * L_trajectory
+    """
+    def __init__(self, cls_weight=1.0, order_weight=0.5, validity_weight=0.5, trajectory_weight=0.1):
+        super().__init__()
+        self.cls_weight = cls_weight
+        self.order_weight = order_weight
+        self.validity_weight = validity_weight
+        self.trajectory_weight = trajectory_weight
+        
+        self.bce = nn.BCEWithLogitsLoss()
+        self.mse = nn.MSELoss()
+        
+    def forward(self, outputs_dict, targets, order_targets=None, validity_targets=None):
+        deepfake_logit = outputs_dict["deepfake_logit"].squeeze(-1)
+        
+        # 1. Classification Loss
+        l_cls = self.bce(deepfake_logit, targets.float())
+        
+        loss = self.cls_weight * l_cls
+        
+        # 2. Order Prediction Loss (Optional, if targets provided)
+        # order_targets: (B, num_experts, num_experts) binary matrix
+        if order_targets is not None and "order_logits" in outputs_dict:
+            l_order = self.bce(outputs_dict["order_logits"], order_targets.float())
+            loss += self.order_weight * l_order
+            
+        # 3. Expert Validity Loss (Optional, if targets provided)
+        # validity_targets: (B, num_experts) binary vector of which experts should be active
+        if validity_targets is not None and "expert_validity_scores" in outputs_dict:
+            l_validity = self.mse(outputs_dict["expert_validity_scores"], validity_targets.float())
+            loss += self.validity_weight * l_validity
+            
+        # Trajectory consistency loss would require paired intermediate activations (omitted for now)
+            
+        return loss
 class LRFinder:
     def __init__(self, model, optimizer, criterion, device):
         self.model = model
@@ -354,12 +395,20 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, limit_b
 
         if device.type == "cuda" and scaler is not None:
             with torch.amp.autocast(device_type="cuda"):
-                logits, _ = model(images)
-                logits = logits.squeeze(1)
-                if use_mixup:
-                    loss = lam * criterion(logits, targets_a) + (1 - lam) * criterion(logits, targets_b)
+                outputs = model(images)
+                if isinstance(outputs, dict):
+                    logits = outputs["deepfake_logit"].squeeze(1)
+                    if use_mixup:
+                        loss = lam * criterion(outputs, targets_a) + (1 - lam) * criterion(outputs, targets_b)
+                    else:
+                        loss = criterion(outputs, labels)
                 else:
-                    loss = criterion(logits, labels)
+                    logits, _ = outputs
+                    logits = logits.squeeze(1)
+                    if use_mixup:
+                        loss = lam * criterion(logits, targets_a) + (1 - lam) * criterion(logits, targets_b)
+                    else:
+                        loss = criterion(logits, labels)
                 scaled_loss = loss / accum_steps
 
             scaler.scale(scaled_loss).backward()
@@ -379,12 +428,20 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, limit_b
                 if ema is not None:
                     ema.update_parameters(model)
         else:
-            logits, _ = model(images)
-            logits = logits.squeeze(1)
-            if use_mixup:
-                loss = lam * criterion(logits, targets_a) + (1 - lam) * criterion(logits, targets_b)
+            outputs = model(images)
+            if isinstance(outputs, dict):
+                logits = outputs["deepfake_logit"].squeeze(1)
+                if use_mixup:
+                    loss = lam * criterion(outputs, targets_a) + (1 - lam) * criterion(outputs, targets_b)
+                else:
+                    loss = criterion(outputs, labels)
             else:
-                loss = criterion(logits, labels)
+                logits, _ = outputs
+                logits = logits.squeeze(1)
+                if use_mixup:
+                    loss = lam * criterion(logits, targets_a) + (1 - lam) * criterion(logits, targets_b)
+                else:
+                    loss = criterion(logits, labels)
             scaled_loss = loss / accum_steps
 
             scaled_loss.backward()
@@ -454,10 +511,17 @@ def evaluate_model(model, loader, criterion, device, limit_batches=None, use_tta
             logits = torch.logit(probs_clamped)
             loss = criterion(logits, labels)
         else:
-            logits, _ = model(images)
-            logits = logits.squeeze(1)
-            loss = criterion(logits, labels)
-            probabilities = torch.sigmoid(logits)
+            with torch.amp.autocast(device_type="cuda") if device.type == "cuda" else torch.autocast(device_type="cpu"):
+                outputs = model(images)
+                if isinstance(outputs, dict):
+                    logits = outputs["deepfake_logit"].squeeze(1)
+                    loss = criterion(outputs, labels)
+                else:
+                    logits, _ = outputs
+                    logits = logits.squeeze(1)
+                    loss = criterion(logits, labels)
+            
+        probabilities = torch.sigmoid(logits)
 
         running_loss += loss.item() * images.size(0)
         all_labels.extend(labels.cpu().numpy().tolist())
@@ -821,13 +885,17 @@ def main():
 
     focal_alpha = getattr(config, "FOCAL_ALPHA", 0.50)
     focal_gamma = getattr(config, "FOCAL_GAMMA", 1.5)
-    criterion = DeepfakeLoss(
-        loss_type=loss_type,
-        alpha=focal_alpha,
-        gamma=focal_gamma,
-        smoothing=config.LABEL_SMOOTHING,
-        class_weights=class_weights
-    )
+    
+    if config.MODEL_VARIANT == "modular_order":
+        criterion = CoReDFLoss()
+    else:
+        criterion = DeepfakeLoss(
+            loss_type=loss_type,
+            alpha=focal_alpha,
+            gamma=focal_gamma,
+            smoothing=config.LABEL_SMOOTHING,
+            class_weights=class_weights
+        )
 
     optimizer = build_optimizer(model)
     scheduler = build_scheduler(optimizer)

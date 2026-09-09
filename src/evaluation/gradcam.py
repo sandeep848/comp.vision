@@ -90,6 +90,10 @@ import torch.nn.functional as F
 from PIL import Image
 import matplotlib.pyplot as plt
 
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 from src.configs import config
 from src.evaluation.evaluate import apply_advanced_tier_distortion, load_model_from_checkpoint
 from src.degradations.transforms import get_transforms

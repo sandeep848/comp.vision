@@ -84,7 +84,7 @@ STOCHASTIC_DEPTH_PROB = 0.30
 BRANCH_MODE = "fusion"  # Options: 'rgb', 'freq', 'fusion'
 
 # Training Strategy
-TRAINING_STRATEGY = "clean"  # Options: 'clean', 'degradation'
+TRAINING_STRATEGY = "degradation"
 
 # Degradation Evaluation Matrix Settings
 DEGRADATION_TIERS = {

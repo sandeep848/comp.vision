@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision import models
 
 from src.configs import config
+from src.models.core_df import ModularExpertHead, OrderInferenceModule, OrderConditionedFusion
 
 class MultiScaleSRMLayer(nn.Module):
     """
@@ -257,18 +258,35 @@ class DeepfakeModel(nn.Module):
                     param.requires_grad = False
 
         # Spatial-Frequency Cross-Attention Module for Fusion Mode
-        if self.branch_mode == "fusion" and self.model_variant == "fusion":
+        if self.branch_mode == "fusion" and self.model_variant in ["fusion", "modular_order"]:
             self.sfca = SpatialFrequencyCrossAttention(spatial_dim=rgb_features, freq_dim=freq_features, embed_dim=256)
         else:
             self.sfca = None
 
-        # Fusion & Classification Head
-        if self.branch_mode == "rgb" or self.model_variant == "rgb_only":
+        # CoRe-DF Modular Architecture Components
+        if self.model_variant == "modular_order":
+            self.num_experts = 6 # jpeg, downscale, motion_blur, gaussian_blur, gaussian_noise, sharpen
+            # 1. Modular Expert Heads (taking SFCA-attended RGB map as input)
+            self.expert_heads = nn.ModuleList([
+                ModularExpertHead(in_channels=rgb_features) for _ in range(self.num_experts)
+            ])
+            
+            # 2. Order Inference Module (takes global pooled RGB+SRM features)
+            self.order_inference = OrderInferenceModule(feature_dim=rgb_features + freq_features, num_experts=self.num_experts)
+            
+            # 3. Order-Conditioned Fusion
+            self.order_fusion = OrderConditionedFusion(expert_feature_dim=rgb_features)
+            
+            # Final Classification Head takes the fused expert features
             total_features = rgb_features
-        elif self.branch_mode == "freq":
-            total_features = freq_features
         else:
-            total_features = rgb_features + freq_features
+            # Standard Fusion & Classification Head
+            if self.branch_mode == "rgb" or self.model_variant == "rgb_only":
+                total_features = rgb_features
+            elif self.branch_mode == "freq":
+                total_features = freq_features
+            else:
+                total_features = rgb_features + freq_features
 
         self.head = EnhancedHead(total_features, config.DROPOUT)
 
@@ -314,6 +332,43 @@ class DeepfakeModel(nn.Module):
                 features.append(rgb_f)
                 features.append(freq_f)
 
+            elif self.model_variant == "modular_order":
+                x_raw = x * self.std + self.mean
+                freq_x = self.srm(x_raw)
+                freq_x = self.srm_norm(freq_x)
+                freq_map = self.freq_convs(freq_x)
+                attended_rgb_map = self.sfca(rgb_map, freq_map)
+                
+                rgb_f = F.adaptive_avg_pool2d(attended_rgb_map, 1).flatten(1)
+                freq_f = F.adaptive_avg_pool2d(freq_map, 1).flatten(1)
+                global_fused = torch.cat([rgb_f, freq_f], dim=1)
+                
+                # 1. Order Inference
+                order_embs, order_logits = self.order_inference(global_fused)
+                
+                # 2. Modular Expert Heads
+                expert_out_list = []
+                for head in self.expert_heads:
+                    expert_out_list.append(head(attended_rgb_map))
+                expert_features = torch.stack(expert_out_list, dim=1) # (B, num_experts, rgb_features)
+                
+                # 3. Order-Conditioned Fusion
+                fused = self.order_fusion(expert_features, order_embs)
+                
+                # 4. Final Classification
+                out, feat = self.head(fused)
+                
+                # Create fake validity scores (expert validity scores could be derived from expert embeddings)
+                # Since not strictly defined yet, we return ones as placeholder for validity loss
+                expert_validity_scores = torch.ones(x.size(0), self.num_experts, device=x.device)
+                
+                return {
+                    "deepfake_logit": out,
+                    "order_logits": order_logits,
+                    "expert_validity_scores": expert_validity_scores,
+                    "feat": feat
+                }
+
         fused = torch.cat(features, dim=1) if len(features) > 1 else features[0]
         out, feat = self.head(fused)
         return out, feat
@@ -321,7 +376,7 @@ class DeepfakeModel(nn.Module):
 
 # The only unambiguous model_variant -> branch_mode mapping (see resolve_checkpoint_model_kwargs
 # docstring for why the reverse direction is NOT similarly inferred).
-_NATURAL_BRANCH_MODE_FOR_VARIANT = {"rgb_only": "rgb", "fusion": "fusion", "fusion_no_attn": "fusion"}
+_NATURAL_BRANCH_MODE_FOR_VARIANT = {"rgb_only": "rgb", "fusion": "fusion", "fusion_no_attn": "fusion", "modular_order": "fusion"}
 
 
 def resolve_checkpoint_model_kwargs(checkpoint=None):
@@ -335,7 +390,7 @@ def resolve_checkpoint_model_kwargs(checkpoint=None):
       2. The nested checkpoint["configuration"] dict's matching key, if present and not None.
       3. For branch_mode ONLY: if the checkpoint specifies model_variant (via 1 or 2) but not
          branch_mode, infer branch_mode from that model_variant using the natural, unambiguous
-         mapping {"rgb_only": "rgb", "fusion": "fusion", "fusion_no_attn": "fusion"}. This is
+         mapping {"rgb_only": "rgb", "fusion": "fusion", "fusion_no_attn": "fusion", "modular_order": "fusion"}. This is
          deliberately preferred over falling back to config.py's current BRANCH_MODE, which may
          belong to an unrelated experiment and would otherwise make resolution for the (very
          common) "checkpoint has model_variant but predates the branch_mode metadata field"
@@ -399,7 +454,7 @@ def build_model(model_name=None, pretrained=None, branch_mode=None, model_varian
         model_variant = getattr(config, 'MODEL_VARIANT', 'fusion')
 
     valid_branch_modes = {"rgb", "freq", "fusion"}
-    valid_variants = {"fusion", "rgb_only", "fusion_no_attn"}
+    valid_variants = {"fusion", "rgb_only", "fusion_no_attn", "modular_order"}
 
     if branch_mode not in valid_branch_modes:
         raise ValueError(f"Invalid branch_mode '{branch_mode}'. Allowed: {valid_branch_modes}")

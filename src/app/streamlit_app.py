@@ -10,8 +10,8 @@ import plotly.graph_objects as go
 from streamlit_image_comparison import image_comparison
 
 # Setup paths
-root_dir = Path(__file__).resolve().parent.parent
-sys.path.append(str(root_dir))
+root_dir = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(root_dir))
 
 from src.configs import config
 from src.models.model import build_model
@@ -98,32 +98,44 @@ from src.evaluation.evaluate import load_model_from_checkpoint
 from src.degradations.transforms import get_transforms
 
 @st.cache_resource
-def load_models():
-    # Attempt to load real checkpoints if they exist
-    clean_ckpt = config.OUTPUT_ROOT / "efficientnet_b0_clean" / "best_model.pt"
-    robust_ckpt = config.OUTPUT_ROOT / "efficientnet_b0_degradation" / "best_model.pt"
+def load_models(model_name_choice="EfficientNet-B0"):
+    # Attempt to load real checkpoints
+    if "EfficientNet" in model_name_choice:
+        base_name = "efficientnet_b0"
+    elif "ResNet" in model_name_choice:
+        base_name = "resnet50"
+    else:
+        base_name = config.MODEL_NAME
+
+    clean_ckpt = config.OUTPUT_ROOT / f"{base_name}_clean" / "best_model.pt"
+    robust_ckpt = config.OUTPUT_ROOT / f"{base_name}_degradation" / "best_model.pt"
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    try:
-        if robust_ckpt.exists():
-            m1, _, _ = load_model_from_checkpoint(robust_ckpt, device)
-        else:
-            m1 = build_model(config.MODEL_NAME, pretrained=False).to(device)
-            m1.eval()
-            
-        if clean_ckpt.exists():
-            m2, _, _ = load_model_from_checkpoint(clean_ckpt, device)
-        else:
-            m2 = build_model(config.MODEL_NAME, pretrained=False).to(device)
-            m2.eval()
-    except Exception:
-        m1 = build_model(config.MODEL_NAME, pretrained=False).to(device)
-        m2 = build_model(config.MODEL_NAME, pretrained=False).to(device)
-        m1.eval(); m2.eval()
+    
+    if not clean_ckpt.exists() and not robust_ckpt.exists():
+        st.error(f"🚨 Checkpoint Load Failure: Neither clean nor robust checkpoints found for {base_name}. Please train the models first.")
+        st.stop()
         
-    return m1, m2
-
-model1, model2 = load_models()
+    m1, t1, m2, t2 = None, 0.5, None, 0.5
+    
+    if robust_ckpt.exists():
+        m1, t1, _ = load_model_from_checkpoint(robust_ckpt, device)
+        m1.eval()
+    else:
+        st.warning(f"Robust checkpoint missing for {base_name}. Using Standard for comparison.")
+        
+    if clean_ckpt.exists():
+        m2, t2, _ = load_model_from_checkpoint(clean_ckpt, device)
+        m2.eval()
+    else:
+        st.warning(f"Standard checkpoint missing for {base_name}.")
+        
+    if m1 is None:
+        m1, t1 = m2, t2
+    if m2 is None:
+        m2, t2 = m1, t1
+        
+    return m1, t1, m2, t2
 
 def run_model(model, img):
     _, eval_transform = get_transforms()
@@ -135,7 +147,7 @@ def run_model(model, img):
         fake_prob = torch.sigmoid(logits.squeeze(1)).item()
     return fake_prob
 
-def generate_real_heatmap(model, img, target_class="predicted"):
+def generate_real_heatmap(model, img, target_class="predicted", threshold=0.5):
     _, eval_transform = get_transforms()
     input_tensor = eval_transform(img).unsqueeze(0)
     device = next(model.parameters()).device
@@ -144,7 +156,7 @@ def generate_real_heatmap(model, img, target_class="predicted"):
         logits, _ = model(input_tensor.to(device))
         prob = torch.sigmoid(logits.squeeze(1)).item()
         
-    resolved_target = "fake" if prob >= 0.5 else "real"
+    resolved_target = "fake" if prob >= threshold else "real"
     if target_class != "predicted":
         resolved_target = target_class
         
@@ -178,12 +190,19 @@ if uploaded_file:
 
     t1, t2, t3 = st.tabs(["👁️ VISION", "📈 TELEMETRY", "🔍 EXPLAINER"])
     
+    model1, thresh1, model2, thresh2 = load_models(model_choice)
     
     # Real probability calculation via forward pass
-    active_model = model1 if "Robust" in model_choice else model2
+    if "Robust" in model_choice:
+        active_model = model1
+        active_thresh = thresh1
+    else:
+        active_model = model2
+        active_thresh = thresh2
+        
     prob_clean = run_model(active_model, orig_img)
     prob_deg = run_model(active_model, deg_img)
-    is_fake = prob_deg > 0.5
+    is_fake = prob_deg > active_thresh
     
     # Estimate degradation penalty for the UI telemetry
     degradation_penalty = max(0, prob_clean - prob_deg)
@@ -218,10 +237,10 @@ if uploaded_file:
             
         with c2:
             st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-            st.write("DEGRADATION SCORE")
+            st.write("CONFIDENCE DELTA")
             deg_score = min(100.0, degradation_penalty * 100)
             st.markdown(f'<div class="metric-value" style="color: #ff9900;">{deg_score:.1f}</div>', unsafe_allow_html=True)
-            st.write("Corruption Index (0-100)")
+            st.write("Confidence Drop (0-100)")
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("### // CONFIDENCE TRAJECTORY")
@@ -256,10 +275,10 @@ if uploaded_file:
         c1, c2 = st.columns(2)
         with c1:
             st.write("ON SOURCE")
-            st.image(generate_real_heatmap(active_model, orig_img), use_container_width=True)
+            st.image(generate_real_heatmap(active_model, orig_img, threshold=active_thresh), use_container_width=True)
         with c2:
             st.write("ON CORRUPTED")
-            st.image(generate_real_heatmap(active_model, deg_img), use_container_width=True)
+            st.image(generate_real_heatmap(active_model, deg_img, threshold=active_thresh), use_container_width=True)
 
 else:
     st.markdown("""
