@@ -1,6 +1,101 @@
-data/*
-!data/.gitkeep
+# Byte-compiled / Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 
-*.mp4
-*.avi
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Packaging & Distribution
+build/
+devel/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# Dataset Downloads, Archives & Temporary Download Files
+/datasets/
+deepfake_robustness/processed_faces/
+processed_faces/
 *.zip
+*.zip*
+*.part
+*.tmp
+*.crdownload
+*.download
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+.gdown*
+downloaded_youtube_videos*
+download_*.log
+download*.json
+filelist.json
+deepfake_detection_filenames.json
+
+# Data Manifests (large generated CSV files)
+deepfake_robustness/*.csv
+
+# Model Checkpoints & Large Weights
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.h5
+*.onnx
+*.safetensors
+*.engine
+*.tflite
+
+# TensorBoard & Experiment Logs
+runs/
+tensorboard/
+*.log
+events.out.tfevents.*
+
+# IDEs & System Files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# Temporary Files & Scratches
+tmp/
+temp/
+scratch/
+
+# Training outputs: prediction CSVs, generated PNGs, checkpoint runs, reports
+deepfake_robustness/outputs/**/*.csv
+deepfake_robustness/outputs/**/*.pt
+deepfake_robustness/outputs/**/*.png
+deepfake_robustness/outputs/**/runs/
+deepfake_robustness/outputs/*.csv
+deepfake_robustness/outputs/*.md
+deepfake_robustness/

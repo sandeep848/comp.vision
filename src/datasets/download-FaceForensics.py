@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+#!/usr/bin/env python
 """Downloads FaceForensics++ public data release."""
+
+# -*- coding: utf-8 -*-
 
 import argparse
 import json
@@ -16,7 +16,10 @@ from tqdm import tqdm
 
 
 FILELIST_URL = "misc/filelist.json"
-DEEPFAKE_DETECTION_URL = "misc/deepfake_detection_filenames.json"
+
+DEEPFAKE_DETECTION_URL = (
+    "misc/deepfake_detection_filenames.json"
+)
 
 DEEPFAKES_MODEL_NAMES = [
     "decoder_A.h5",
@@ -24,18 +27,39 @@ DEEPFAKES_MODEL_NAMES = [
     "encoder.h5",
 ]
 
+
 DATASETS = {
-    "original_youtube_videos": "misc/downloaded_youtube_videos.zip",
-    "original_youtube_videos_info": "misc/downloaded_youtube_videos_info.zip",
-    "original": "original_sequences/youtube",
-    "DeepFakeDetection_original": "original_sequences/actors",
-    "Deepfakes": "manipulated_sequences/Deepfakes",
-    "DeepFakeDetection": "manipulated_sequences/DeepFakeDetection",
-    "Face2Face": "manipulated_sequences/Face2Face",
-    "FaceShifter": "manipulated_sequences/FaceShifter",
-    "FaceSwap": "manipulated_sequences/FaceSwap",
-    "NeuralTextures": "manipulated_sequences/NeuralTextures",
+    "original_youtube_videos":
+        "misc/downloaded_youtube_videos.zip",
+
+    "original_youtube_videos_info":
+        "misc/downloaded_youtube_videos_info.zip",
+
+    "original":
+        "original_sequences/youtube",
+
+    "DeepFakeDetection_original":
+        "original_sequences/actors",
+
+    "Deepfakes":
+        "manipulated_sequences/Deepfakes",
+
+    "DeepFakeDetection":
+        "manipulated_sequences/DeepFakeDetection",
+
+    "Face2Face":
+        "manipulated_sequences/Face2Face",
+
+    "FaceShifter":
+        "manipulated_sequences/FaceShifter",
+
+    "FaceSwap":
+        "manipulated_sequences/FaceSwap",
+
+    "NeuralTextures":
+        "manipulated_sequences/NeuralTextures",
 }
+
 
 ALL_DATASETS = [
     "original",
@@ -48,17 +72,20 @@ ALL_DATASETS = [
     "NeuralTextures",
 ]
 
+
 COMPRESSION_LEVELS = [
     "raw",
     "c23",
     "c40",
 ]
 
+
 FILE_TYPES = [
     "videos",
     "masks",
     "models",
 ]
+
 
 SERVERS = [
     "EU",
@@ -68,9 +95,15 @@ SERVERS = [
 
 
 def parse_args():
+
     parser = argparse.ArgumentParser(
-        description="Downloads FaceForensics++ public data release.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Downloads FaceForensics++ "
+            "public data release."
+        ),
+        formatter_class=(
+            argparse.ArgumentDefaultsHelpFormatter
+        ),
     )
 
     parser.add_argument(
@@ -120,19 +153,38 @@ def parse_args():
     args = parser.parse_args()
 
     if args.server == "EU":
-        server_url = "http://canis.vc.in.tum.de:8100/"
+
+        server_url = (
+            "http://canis.vc.in.tum.de:8100/"
+        )
 
     elif args.server == "EU2":
-        server_url = "http://kaldir.vc.in.tum.de/faceforensics/"
+
+        server_url = (
+            "http://kaldir.vc.in.tum.de/"
+            "faceforensics/"
+        )
 
     elif args.server == "CA":
-        server_url = "http://falas.cmpt.sfu.ca:8100/"
+
+        server_url = (
+            "http://falas.cmpt.sfu.ca:8100/"
+        )
 
     else:
-        raise ValueError(f"Unsupported server: {args.server}")
 
-    args.tos_url = server_url + "webpage/FaceForensics_TOS.pdf"
-    args.base_url = server_url + "v3/"
+        raise ValueError(
+            f"Unsupported server: {args.server}"
+        )
+
+    args.tos_url = (
+        server_url
+        + "webpage/FaceForensics_TOS.pdf"
+    )
+
+    args.base_url = (
+        server_url + "v3/"
+    )
 
     args.deepfakes_model_url = (
         server_url
@@ -143,31 +195,43 @@ def parse_args():
     return args
 
 
-def reporthook(count, block_size, total_size):
-    """Display download progress."""
+def reporthook(
+    count,
+    block_size,
+    total_size,
+):
 
     global start_time
 
     if count == 0:
+
         start_time = time.time()
+
         return
 
-    duration = max(time.time() - start_time, 1e-6)
+    duration = max(
+        time.time() - start_time,
+        1e-6,
+    )
 
-    progress_size = int(count * block_size)
+    progress_size = int(
+        count * block_size
+    )
 
     speed = int(
-        progress_size / (1024 * duration)
+        progress_size
+        / (1024 * duration)
     )
 
     percent = 0
 
     if total_size > 0:
+
         percent = int(
-            min(
-                progress_size * 100 / total_size,
-                100,
-            )
+            count
+            * block_size
+            * 100
+            / total_size
         )
 
     sys.stdout.write(
@@ -186,9 +250,10 @@ def download_file(
     output_file,
     report_progress=False,
 ):
-    """Download a single file."""
 
-    output_directory = os.path.dirname(output_file)
+    output_directory = os.path.dirname(
+        output_file
+    )
 
     os.makedirs(
         output_directory,
@@ -196,26 +261,34 @@ def download_file(
     )
 
     if os.path.isfile(output_file):
+
         tqdm.write(
             "Skipping existing file: "
             + output_file
         )
+
         return
 
-    file_handle, temporary_file = tempfile.mkstemp(
-        dir=output_directory
+    file_handle, temporary_file = (
+        tempfile.mkstemp(
+            dir=output_directory
+        )
     )
 
     os.close(file_handle)
 
     try:
+
         if report_progress:
+
             urllib.request.urlretrieve(
                 url,
                 temporary_file,
                 reporthook=reporthook,
             )
+
         else:
+
             urllib.request.urlretrieve(
                 url,
                 temporary_file,
@@ -227,8 +300,14 @@ def download_file(
         )
 
     except Exception:
-        if os.path.exists(temporary_file):
-            os.remove(temporary_file)
+
+        if os.path.exists(
+            temporary_file
+        ):
+
+            os.remove(
+                temporary_file
+            )
 
         raise
 
@@ -238,14 +317,16 @@ def download_files(
     base_url,
     output_path,
 ):
-    """Download multiple files."""
 
     os.makedirs(
         output_path,
         exist_ok=True,
     )
 
-    for filename in tqdm(filenames):
+    for filename in tqdm(
+        filenames
+    ):
+
         download_file(
             base_url + filename,
             join(
@@ -256,11 +337,15 @@ def download_files(
 
 
 def load_json(url):
-    """Load JSON data from a URL."""
 
-    with urllib.request.urlopen(url) as response:
+    with urllib.request.urlopen(
+        url
+    ) as response:
+
         return json.loads(
-            response.read().decode("utf-8")
+            response.read().decode(
+                "utf-8"
+            )
         )
 
 
@@ -268,55 +353,75 @@ def build_filelist(
     args,
     dataset_path,
 ):
-    """Build the list of files to download."""
 
     if (
         "DeepFakeDetection" in dataset_path
         or "actors" in dataset_path
     ):
+
         filepaths = load_json(
             args.base_url
+            + "/"
             + DEEPFAKE_DETECTION_URL
         )
 
         if "actors" in dataset_path:
-            filelist = filepaths["actors"]
+
+            filelist = filepaths[
+                "actors"
+            ]
+
         else:
+
             filelist = filepaths[
                 "DeepFakesDetection"
             ]
 
     elif "original" in dataset_path:
+
         file_pairs = load_json(
-            args.base_url + FILELIST_URL
+            args.base_url
+            + "/"
+            + FILELIST_URL
         )
 
         filelist = []
 
         for pair in file_pairs:
-            filelist.extend(pair)
+
+            filelist.extend(
+                pair
+            )
 
     else:
+
         file_pairs = load_json(
-            args.base_url + FILELIST_URL
+            args.base_url
+            + "/"
+            + FILELIST_URL
         )
 
         filelist = []
 
         for pair in file_pairs:
+
             filelist.append(
                 "_".join(pair)
             )
 
             if args.type != "models":
+
                 filelist.append(
-                    "_".join(pair[::-1])
+                    "_".join(
+                        pair[::-1]
+                    )
                 )
 
     if (
         args.num_videos is not None
         and args.num_videos > 0
     ):
+
         print(
             f"Downloading first "
             f"{args.num_videos} files."
@@ -330,7 +435,6 @@ def build_filelist(
 
 
 def main(args):
-    """Main download routine."""
 
     print(
         "By continuing, you confirm "
@@ -356,10 +460,13 @@ def main(args):
     )
 
     for dataset in selected_datasets:
-        dataset_path = DATASETS[dataset]
+
+        dataset_path = DATASETS[
+            dataset
+        ]
 
         print(
-            f"\nDownloading {dataset}"
+            f"Downloading {dataset}"
         )
 
         filelist = build_filelist(
@@ -368,6 +475,7 @@ def main(args):
         )
 
         if args.type == "videos":
+
             download_url = (
                 args.base_url
                 + f"{dataset_path}/"
@@ -399,14 +507,17 @@ def main(args):
             )
 
         elif args.type == "masks":
+
             if (
                 "original" in dataset
                 or dataset == "FaceShifter"
             ):
+
                 print(
                     "Masks unavailable for:",
                     dataset,
                 )
+
                 continue
 
             download_url = (
@@ -434,14 +545,20 @@ def main(args):
             )
 
         elif args.type == "models":
+
             if dataset != "Deepfakes":
+
                 print(
                     "Models only available "
                     "for Deepfakes."
                 )
+
                 continue
 
-            for folder in tqdm(filelist):
+            for folder in tqdm(
+                filelist
+            ):
+
                 folder_url = (
                     args.deepfakes_model_url
                     + folder
@@ -458,9 +575,9 @@ def main(args):
                 for model_file in (
                     DEEPFAKES_MODEL_NAMES
                 ):
+
                     download_file(
-                        folder_url
-                        + model_file,
+                        folder_url + model_file,
                         join(
                             folder_output,
                             model_file,
@@ -469,5 +586,7 @@ def main(args):
 
 
 if __name__ == "__main__":
+
     args = parse_args()
+
     main(args)
